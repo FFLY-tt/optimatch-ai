@@ -218,3 +218,11 @@ __marimo__/
 .streamlit/secrets.toml
 
 data/*.pdf
+
+data/chroma_db/
+data/uploaded_resume.pdf
+data/exports/
+data/status_store.json
+API.txt 
+
+data/chroma_db/
