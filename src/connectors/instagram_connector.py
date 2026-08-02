@@ -1,16 +1,22 @@
 """
-Instagram Connector —— 通过 RapidAPI（RocketAPI 或同类 Instagram Scraper）
-按 hashtag 抓取相关帖子的作者，再逐个查询 profile 拿 bio / 粉丝数，
-提取 bio 里的公开邮箱。
+Instagram Connector —— 通过 RapidAPI 上的 Instagram Statistics API
+按关键词搜索 KOL/KOC 账号，返回统一的 UnifiedRecord。
 
-返回值统一转成 UnifiedRecord，字段对齐 tavily_connector 的输出格式，
-这样上层 search_agent.py 不需要对 Instagram 结果做任何特殊处理，
-可以和网页搜索结果一起去重、过滤、展示。
+【核心改进：全部用服务端参数筛选，不在客户端循环过滤】
+这个接口支持直接传粉丝区间、平台类型、互动率区间等参数，
+服务端返回的就是已经筛好的结果，不需要我们自己拉回来再过滤，
+既省调用额度，又不会因为"拉回30条全不符合"而返回0条结果。
 
-⚠️ 使用前需要设置环境变量 RAPIDAPI_KEY。
-⚠️ IG_HOST 请替换成你在 RapidAPI 实际订阅的接口 host（不同 wrapper host 不同）。
-⚠️ 每次 search() 调用内部会对每个作者额外发一次 profile 请求，
-   注意这会成倍消耗 RapidAPI 调用额度（按次计费的话尤其要控制 max_results）。
+关键参数说明（来自接口文档 Params 44项）：
+- socialTypes=INST    只要 Instagram，过滤掉 TikTok/FB/Twitter/YouTube
+- minUsersCount       粉丝数下限
+- maxUsersCount       粉丝数上限
+- locations           账号所在地区（country or city，来自 Tags 端点的值）
+- minER / maxER       互动率区间（avgER，小数格式，0.02 = 2%）
+- sort=usersCount     升序排列，让腰部账号排在前面（不加负号=升序）
+- trackTotal=true     返回总数，方便调试
+
+⚠️ RAPIDAPI_KEY 请配置在 .env 里，不要在测试脚本里手动赋值。
 """
 
 import os
@@ -18,11 +24,14 @@ import re
 from typing import Optional
 
 import requests
+from dotenv import load_dotenv
 
 from src.schema import UnifiedRecord
 
+load_dotenv()
+
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
-IG_HOST = "rocketapi-for-instagram.p.rapidapi.com"  # 以你实际订阅的接口文档为准，先手动测试确认真实字段结构
+IG_HOST = "instagram-statistics-api.p.rapidapi.com"
 
 HEADERS = {
     "X-RapidAPI-Key": RAPIDAPI_KEY,
@@ -32,71 +41,107 @@ HEADERS = {
 EMAIL_PATTERN = re.compile(r"[\w\.-]+@[\w\.-]+\.\w+")
 
 
-def _extract_email(bio: str) -> Optional[str]:
-    if not bio:
+def _extract_email(text: str) -> Optional[str]:
+    if not text:
         return None
-    match = EMAIL_PATTERN.search(bio)
+    match = EMAIL_PATTERN.search(text)
     return match.group(0) if match else None
 
 
-def _get_profile(username: str) -> dict:
+def search(
+    query: str,
+    platform_type: str = "business",
+    max_results: int = 10,
+    min_followers: int = 3000,
+    max_followers: int = 50000,
+    location: str = "",  # 默认不限地区，全球范围；如需限定可传如 "united-states" / "united-kingdom"
+    min_er: Optional[float] = None,
+    max_er: Optional[float] = None,
+) -> list[UnifiedRecord]:
     """
-    查询单个用户的 profile，拿 bio 和粉丝数。
-    注意：这是一次独立的 API 调用，hashtag 搜索返回多少个作者，这里就会额外调用多少次。
-    """
-    url = f"https://{IG_HOST}/instagram/user/get_info"
-    resp = requests.get(url, headers=HEADERS, params={"username": username}, timeout=10)
-    resp.raise_for_status()
-    return resp.json().get("user", {})
+    按关键词搜索 Instagram KOC 账号，服务端直接筛好粉丝区间和平台。
 
-
-def search(query: str, platform_type: str = "business", max_results: int = 10) -> list[UnifiedRecord]:
-    """
-    query 直接当作 hashtag 使用（自动去掉可能带的 # 号和空格）。
-    保持和 tavily_search(query=..., platform_type=..., max_results=...) 一致的调用签名，
-    这样上层调用代码不需要区分是在调哪个 connector。
-
-    返回：list[UnifiedRecord]，source 字段固定为 "instagram"。
+    query: 搜索关键词（由 search_agent 根据 hashtag 传入）
+    min_followers / max_followers: 粉丝区间，默认 3,000 ~ 50,000
+    location: 账号地区，默认 united-states（值来自 Tags 端点的 location 类型）
+    min_er / max_er: 互动率区间（可选，0.02 = 2%），不传则不限制
     """
     if not RAPIDAPI_KEY:
-        raise RuntimeError("环境变量 RAPIDAPI_KEY 未设置，请先配置 RapidAPI 密钥")
+        print("  [调试] Instagram connector: RAPIDAPI_KEY 未设置，跳过本次调用")
+        return []
 
-    hashtag = query.lstrip("#").replace(" ", "")
+    params: dict = {
+        "q": query.lstrip("#"),
+        "page": "1",
+        "perPage": str(max_results),
+        "sort": "usersCount",        # 升序，让腰部账号排前面
+        "minUsersCount": str(min_followers),
+        "maxUsersCount": str(max_followers),
+        "trackTotal": "true",
+        # socialTypes 不传 = 跨平台返回（INST / TW / TT / YT 等都要）
+    }
 
-    url = f"https://{IG_HOST}/instagram/hashtag/get_medias"
-    resp = requests.get(
-        url, headers=HEADERS, params={"hashtag": hashtag, "count": max_results}, timeout=10
-    )
-    resp.raise_for_status()
-    medias = resp.json().get("data", {}).get("items", [])
+    if location:
+        params["locations"] = location
+    if min_er is not None:
+        params["minER"] = str(min_er)
+    if max_er is not None:
+        params["maxER"] = str(max_er)
+
+    try:
+        resp = requests.get(
+            f"https://{IG_HOST}/search",
+            headers=HEADERS,
+            params=params,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        print(f"  [调试] Instagram API 调用失败: {e}")
+        return []
+
+    data_list = data.get("data", [])
+    total = data.get("total", "?")
+    print(f"  [调试] Instagram 搜索 '{query}'：服务端共 {total} 条符合条件，本次返回 {len(data_list)} 条")
 
     records: list[UnifiedRecord] = []
-    seen_usernames: set[str] = set()
-
-    for media in medias:
-        username = media.get("user", {}).get("username")
-        if not username or username in seen_usernames:
-            continue
-        seen_usernames.add(username)
-
-        try:
-            profile = _get_profile(username)
-        except requests.RequestException as e:
-            print(f"  [调试] Instagram profile 获取失败 @{username}: {e}")
-            continue
-
-        bio = profile.get("biography", "") or ""
-        followers = profile.get("follower_count")
+    for item in data_list:
+        screen_name = item.get("screenName") or "unknown"
+        followers = item.get("usersCount", 0)
+        bio = item.get("description", "") or ""
+        profile_url = item.get("url") or f"https://instagram.com/{screen_name}"
         email = _extract_email(bio)
+
+        avg_er = item.get("avgER")
+        er_str = f"{avg_er * 100:.2f}%" if avg_er else "N/A"
+
+        content_text = (
+            f"Bio: {bio}\n"
+            f"Engagement Rate: {er_str}\n"
+            f"Contact Email: {email if email else 'Not listed in Bio'}"
+        )
+
+        # 把接口返回的平台代码映射成可读的 source 字符串
+        social_type_map = {
+            "INST": "instagram",
+            "TW": "twitter",
+            "TT": "tiktok",
+            "YT": "youtube",
+            "FB": "facebook",
+            "TG": "telegram",
+        }
+        raw_type = item.get("socialType", "")
+        source = social_type_map.get(raw_type, raw_type.lower() or "social")
 
         records.append(
             UnifiedRecord(
-                source="instagram",
-                title=f"@{username} ({followers or 0} followers)",
-                content=bio,
-                url=f"https://instagram.com/{username}",
+                source=source,
+                title=f"@{screen_name} ({followers:,} followers) [KOC]",
+                content=content_text,
+                url=profile_url,
                 platform_type=platform_type,
-                author=username,
+                author=screen_name,
                 email=email,
                 followers=followers,
             )
@@ -107,8 +152,16 @@ def search(query: str, platform_type: str = "business", max_results: int = 10) -
 
 if __name__ == "__main__":
     # 独立测试：python -m src.connectors.instagram_connector
-    # 建议先用小的 max_results（比如2-3）测试真实返回结构，确认字段名对得上，再放大规模跑
-    results = search(query="petaccessories", max_results=3)
-    print(f"共抓取 {len(results)} 条结果\n")
+    import time
+
+    print("=== 测试1：宠物类关键词，美国账号，3k-5w粉丝 ===")
+    start = time.time()
+    results = search(query="pet", max_results=5)
+    elapsed = time.time() - start
+    print(f"耗时: {elapsed:.2f}秒")
+    print(f"共拿到 {len(results)} 条结果\n")
     for r in results:
-        print(f"- {r.title} | email={r.email} | {r.url}")
+        print(f"  - {r.title}")
+        print(f"    email={r.email}")
+        print(f"    {r.url}")
+        print()

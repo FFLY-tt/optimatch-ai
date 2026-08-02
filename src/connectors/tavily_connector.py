@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from tavily import TavilyClient
 from src.schema import UnifiedRecord
+from src.connectors.base import BaseDataConnector
 
 load_dotenv()
 
@@ -46,16 +47,6 @@ def search(query: str, platform_type: str = "business", max_results: int = 10) -
 
     records = []
     for item in response.get("results", []):
-        title = item.get("title", "")
-        url = item.get("url", "")
-
-        # 求职场景下，排除掉自由职业者自荐帖（[FOR HIRE]），只保留公司招聘帖
-        if platform_type == "job" and "[for hire]" in title.lower():
-            continue
-
-        # 排除版块首页（比如 reddit.com/r/forhire，没有具体帖子路径），这种不是真正的招聘信息
-        if platform_type == "job" and url.rstrip("/").count("/") <= 4:
-            continue
         record = UnifiedRecord(
             source="tavily",
             title=item.get("title", "")[:120],
@@ -70,6 +61,17 @@ def search(query: str, platform_type: str = "business", max_results: int = 10) -
     return records
 
 
+class TavilyConnector(BaseDataConnector):
+    """
+    Tavily 全网搜索连接器，按 BaseDataConnector 规范包装 search()。
+    """
+
+    source_name = "tavily"
+
+    def fetch(self, query: str, platform_type: str = "business", max_results: int = 10, **kwargs) -> list[UnifiedRecord]:
+        return search(query=query, platform_type=platform_type, max_results=max_results)
+
+
 if __name__ == "__main__":
     # 直接运行测试：python -m src.connectors.tavily_connector
     # 第一周最关键的验证：分别测求职关键词和跨境关键词，人工检查结果质量
@@ -77,23 +79,21 @@ if __name__ == "__main__":
     print("=" * 60)
     print("测试1：求职场景关键词")
     job_results = search(
-        query="site:reddit.com r/forhire [HIRING] remote AI engineer python",
+        query="site:reddit.com r/forhire remote AI engineer python",
         platform_type="job",
-        max_results=8,   # 多要几条，因为过滤掉一部分后可能剩得少
+        max_results=5,
     )
     print(f"返回 {len(job_results)} 条结果\n")
     for r in job_results:
         print("-", r.title, "|", r.url)
 
     print("\n" + "=" * 60)
-    print("测试2：跨境商机场景关键词（多角度查询）")
-    biz_queries = [
-        "TikTok affiliate program pet products commission",
-        "looking for dropshipping supplier pet accessories",
-        "reddit r/Entrepreneur looking for manufacturer pet products",
-    ]
-    for q in biz_queries:
-        print(f"\n查询词: {q}")
-        biz_results = search(query=q, platform_type="business", max_results=3)
-        for r in biz_results:
-            print("-", r.title, "|", r.url)
+    print("测试2：跨境商机场景关键词")
+    biz_results = search(
+        query="looking for TikTok affiliate pet products",
+        platform_type="business",
+        max_results=5,
+    )
+    print(f"返回 {len(biz_results)} 条结果\n")
+    for r in biz_results:
+        print("-", r.title, "|", r.url)
