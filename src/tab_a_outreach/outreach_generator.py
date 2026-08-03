@@ -114,7 +114,7 @@ def generate_outreach_message(
 if __name__ == "__main__":
     # 测试运行：python -m src.outreach_generator
     from src.retriever import hybrid_search
-    from src.business_profile import BUSINESS_COLLECTION_NAME
+    from src.tab_a_outreach.business_profile import BUSINESS_COLLECTION_NAME
 
     test_opportunity = (
         "Planning to open a pet food manufacturing business. Looking for reliable suppliers "
