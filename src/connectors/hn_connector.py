@@ -13,7 +13,7 @@ Hacker News「Who is hiring」数据连接器。
 import re
 import requests
 from datetime import datetime, timezone
-from src.schema import UnifiedRecord
+from src.core.schema import UnifiedRecord
 from src.connectors.base import BaseDataConnector
 
 ALGOLIA_SEARCH_URL = "https://hn.algolia.com/api/v1/search_by_date"

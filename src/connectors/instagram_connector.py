@@ -26,7 +26,7 @@ from typing import Optional
 import requests
 from dotenv import load_dotenv
 
-from src.schema import UnifiedRecord
+from src.core.schema import UnifiedRecord
 
 load_dotenv()
 

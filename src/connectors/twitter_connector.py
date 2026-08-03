@@ -14,7 +14,7 @@ import os
 
 import requests
 
-from src.schema import UnifiedRecord
+from src.core.schema import UnifiedRecord
 
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
 TW_HOST = "twitter-api45.p.rapidapi.com"  # 以你实际订阅的接口文档为准

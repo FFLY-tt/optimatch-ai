@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.connectors.hn_connector import fetch_hn_jobs
 from src.connectors.tavily_connector import search
-from src.llm_client import chat, FILTER_MODEL
+from src.core.llm_client import chat, FILTER_MODEL
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 

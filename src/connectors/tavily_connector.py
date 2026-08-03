@@ -10,8 +10,9 @@ import os
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from tavily import TavilyClient
-from src.schema import UnifiedRecord
+from src.core.schema import UnifiedRecord
 from src.connectors.base import BaseDataConnector
+
 
 load_dotenv()
 
