@@ -12,6 +12,8 @@ from src.vector_store import build_resume_collection
 from src.retriever import hybrid_search
 from src.resume_generator import generate_tailored_resume
 from src.connectors.hn_connector import fetch_hn_jobs
+from src.connectors.remoteok_connector import search as remoteok_search
+from src.connectors.remotive_connector import search as remotive_search
 from src.core.search_agent import run_search_agent
 from src.word_export import export_resume_to_docx
 
@@ -114,15 +116,52 @@ class SearchJobsResponse(BaseModel):
     jobs: list[JobRecord]
     total: int
 
+def _round_robin_merge(source_lists: list[list[JobRecord]], limit: int) -> list[JobRecord]:
+    """
+    按"轮流从每路各取一条"的方式合并多路来源，而不是拼接后截断。
+    简单拼接+截断的话，排在列表前面的来源（HN/AnySearch）只要凑够
+    max_results 就会把排后面的来源（RemoteOK/Remotive）完全挤掉、白抓。
+    轮流取的方式能保证只要某路来源有数据，就至少有机会入选一条。
+
+    顺带做跨来源去重：不同来源理论上可能抓到同一条职位的链接，按 url
+    去重（保留先出现的那条），空 url 不参与去重判断（避免多条 url
+    缺失的记录互相"误判"成重复）。
+    """
+    result: list[JobRecord] = []
+    seen_urls: set[str] = set()
+    idx = 0
+    while len(result) < limit:
+        any_source_has_more = False
+        for lst in source_lists:
+            if idx >= len(lst):
+                continue
+            any_source_has_more = True
+            item = lst[idx]
+            if item.url and item.url in seen_urls:
+                continue
+            if item.url:
+                seen_urls.add(item.url)
+            result.append(item)
+            if len(result) >= limit:
+                break
+        if not any_source_has_more:
+            break
+        idx += 1
+    return result
+
+
 @router.post("/api/search-jobs", response_model=SearchJobsResponse)
 def search_jobs(request: SearchJobsRequest):
-    jobs = []
+    hn_jobs: list[JobRecord] = []
+    anysearch_jobs: list[JobRecord] = []
+    remoteok_jobs: list[JobRecord] = []
+    remotive_jobs: list[JobRecord] = []
 
     try:
         hn_records = fetch_hn_jobs(limit=request.max_results)
         for r in hn_records:
             record_id = f"hn_{r.url.split('id=')[-1]}"
-            jobs.append(JobRecord(
+            hn_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title,
                 url=r.url, posted_at=r.posted_at, status="new",
             ))
@@ -139,14 +178,41 @@ def search_jobs(request: SearchJobsRequest):
         )
         for r in agent_records:
             record_id = f"tavily_{abs(hash(r.url))}"
-            jobs.append(JobRecord(
+            anysearch_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title,
                 url=r.url, posted_at=r.posted_at, status="new",
             ))
     except Exception as e:
         print(f"  [调试] 搜索 Agent 失败: {e}")
 
-    jobs = jobs[:request.max_results]
+    # RemoteOK / Remotive 都不支持按地区过滤，target_region 传不进去——
+    # 这两路返回的是全球远程岗位，不保证匹配 target_region。
+    try:
+        remoteok_records = remoteok_search(keyword=request.target_role, max_results=request.max_results)
+        for r in remoteok_records:
+            record_id = f"remoteok_{abs(hash(r.url))}"
+            remoteok_jobs.append(JobRecord(
+                id=record_id, source=r.source, title=r.title,
+                url=r.url, posted_at=r.posted_at, status="new",
+            ))
+    except Exception as e:
+        print(f"  [调试] RemoteOK 抓取失败: {e}")
+
+    try:
+        remotive_records = remotive_search(keyword=request.target_role, max_results=request.max_results)
+        for r in remotive_records:
+            record_id = f"remotive_{abs(hash(r.url))}"
+            remotive_jobs.append(JobRecord(
+                id=record_id, source=r.source, title=r.title,
+                url=r.url, posted_at=r.posted_at, status="new",
+            ))
+    except Exception as e:
+        print(f"  [调试] Remotive 抓取失败: {e}")
+
+    jobs = _round_robin_merge(
+        [hn_jobs, anysearch_jobs, remoteok_jobs, remotive_jobs],
+        limit=request.max_results,
+    )
     return SearchJobsResponse(jobs=jobs, total=len(jobs))
 
 

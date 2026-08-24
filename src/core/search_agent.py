@@ -35,7 +35,10 @@
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.core.llm_client import chat, FILTER_MODEL
-from src.connectors.tavily_connector import search as tavily_search
+from src.connectors.anysearch_connector import search as web_search
+# 原来接的是 Tavily（src.connectors.tavily_connector），现在换成 AnySearch 试一下，
+# 想切回去就把上面这行改回:
+# from src.connectors.tavily_connector import search as web_search
 from src.connectors import instagram_connector
 from src.core.schema import UnifiedRecord
 
@@ -269,7 +272,8 @@ def run_search_agent(
     context: 补充上下文（简历摘要 / 业务描述）
     platform_type: "job" 或 "business"
 
-    注意：这个函数目前只对接 Tavily（网页搜索）。Instagram/Twitter 这类
+    注意：这个函数目前只对接网页搜索（原来是 Tavily，现在试着换成了 AnySearch，
+    见文件顶部 import 处的说明）。Instagram/Twitter 这类
     结构化社交媒体数据源的查询方式（hashtag、短关键词）和网页自然语言搜索
     差异很大，不适合塞进同一个"规划-执行-反思"循环里，而是在
     run_categorized_opportunity_search 中针对 affiliate_kol 类别单独调用。
@@ -293,7 +297,7 @@ def run_search_agent(
         for q in new_queries:
             tried_queries.add(q)
             try:
-                results = tavily_search(query=q, platform_type=platform_type, max_results=max_results_per_query)
+                results = web_search(query=q, platform_type=platform_type, max_results=max_results_per_query)
                 for r in results:
                     all_records[r.url] = r  # 用 url 去重，同一条结果多次搜到只保留一份
             except Exception as e:

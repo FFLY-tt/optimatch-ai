@@ -25,6 +25,11 @@ class UnifiedRecord:
     author: Optional[str] = None        # 发布者（可选）
     email: Optional[str] = None         # 新增：从社交媒体 bio 中提取的邮箱（可选，只有IG/Twitter来源才可能有值）
     followers: Optional[int] = None     # 新增：粉丝数（可选，只有IG/Twitter来源才可能有值）
+    company: Optional[str] = None       # 新增：公司名（可选，目前只有 remoteok/remotive 这类招聘源会填）
+    location: Optional[str] = None      # 新增：地点/候选人所在地要求（可选，同上）
+    salary: Optional[str] = None        # 新增：薪资文本（可选，同上）
+    remote: Optional[bool] = None       # 新增：是否远程岗位（可选，同上）
+    category: Optional[str] = None      # 新增：岗位分类（可选，同上）
 
     def to_dict(self):
         return asdict(self)

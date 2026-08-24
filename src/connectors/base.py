@@ -12,7 +12,7 @@
 """
 
 from abc import ABC, abstractmethod
-from src.schema import UnifiedRecord
+from src.core.schema import UnifiedRecord
 
 
 class BaseDataConnector(ABC):
