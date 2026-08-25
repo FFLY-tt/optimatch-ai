@@ -9,7 +9,7 @@
 
 import requests
 from bs4 import BeautifulSoup
-from src.vector_store import build_resume_collection
+from src.core.vector_store import build_resume_collection
 
 BUSINESS_COLLECTION_NAME = "business_profile"
 

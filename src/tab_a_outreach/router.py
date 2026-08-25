@@ -4,11 +4,10 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-# 假设核心组件都已按照设想移动到了相应的目录，此处引入时按需调整路径
 from src.core.search_agent import suggest_relevant_categories, run_categorized_opportunity_search, LEAD_CATEGORIES
 from src.tab_a_outreach.business_profile import build_business_profile, BUSINESS_COLLECTION_NAME
 from src.tab_a_outreach.outreach_generator import generate_outreach_message
-from src.retriever import hybrid_search
+from src.core.retriever import hybrid_search
 
 router = APIRouter(tags=["Tab A - Business Opportunities"])
 

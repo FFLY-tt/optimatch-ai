@@ -5,7 +5,7 @@
 - 反思标准换成：忠实性、切中痛点、自然度
 """
 
-from src.llm_client import chat, GENERATE_MODEL, FILTER_MODEL
+from src.core.llm_client import chat, GENERATE_MODEL, FILTER_MODEL
 
 
 OUTREACH_SYSTEM_PROMPT = """You are an expert B2B outreach copywriter. You will be given a \

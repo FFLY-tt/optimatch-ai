@@ -12,7 +12,7 @@ from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-EXPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "exports")
+EXPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "exports")
 
 
 def export_resume_to_docx(content: str, candidate_name: str) -> str:

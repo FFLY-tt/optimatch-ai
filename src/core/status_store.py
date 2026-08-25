@@ -9,7 +9,7 @@ import os
 import json
 import threading
 
-STATUS_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "status_store.json")
+STATUS_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "data", "status_store.json")
 _lock = threading.Lock()
 
 
