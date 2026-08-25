@@ -3,8 +3,24 @@
 用 sentence-transformers 在本地把文字转成向量（不用调用外部 API，免费、无网络延迟），
 存进 Chroma 向量数据库，然后支持"给一段职位描述，检索最相关的简历片段"。
 
-模型选择：all-MiniLM-L6-v2，是 sentence-transformers 里最常用的轻量模型，
-速度快、效果够用，适合 MVP 阶段。
+模型选择：paraphrase-multilingual-MiniLM-L12-v2（多语言）。
+
+之前用的 all-MiniLM-L6-v2 只是英文语料训练的，实测坐实过真实问题：跨语言
+相似度对齐很弱——比如一条英文 JD 去匹配中英混合的简历画像时，中文 chunk
+会因为"语言不匹配"而普遍算出偏低的相似度，不是因为内容不相关；反过来，
+两段语言相同但内容毫不相关的文本，有时候比语言不同但内容真正相关的文本
+分数还高（实测坐实过一次：不相关的中文 JD 反而比相关的英文 JD 打分更高）。
+这个系统的简历/JD 匹配场景本来就需要处理中英文混合数据，必须用多语言模型。
+
+换成同样是 MiniLM 量级（相对轻量，不是 mpnet-base-v2 那种更大更慢的多语言
+模型）的多语言版本，向量维度都是 384，Chroma 里存的向量结构不受影响。
+代价：模型文件从 88MB 涨到 458MB（约 5.2 倍），热加载耗时从 1.58s 涨到
+3.02s（约 1.9 倍），单条编码延迟从 3.1ms 涨到 3.8ms（约 1.2 倍，影响较小）。
+第一次运行需要下载模型（实测约 18s，之后走本地缓存）。
+
+⚠️ 换模型后，Chroma 里任何用旧模型算出来的历史 embedding 都和新模型的向量
+空间不兼容（不能直接混用/比较），必须重新生成——local dev 环境直接删掉
+data/chroma_db 重新建，不需要做迁移逻辑。
 """
 
 import json
@@ -17,7 +33,7 @@ from sentence_transformers import SentenceTransformer
 _model = None
 _client = None
 
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 
 # 简历 AST 解析产出的 chunk（句子 + tags）用的独立 collection，
 # 和 build_resume_collection() 那个"按 section 整段存、每次覆盖"的旧方案
