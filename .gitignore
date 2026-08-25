@@ -225,6 +225,7 @@ data/exports/
 data/status_store.json
 data/resumes/
 data/resume_keywords.json
+data/profile_language.json
 API.txt 
 
 data/chroma_db/

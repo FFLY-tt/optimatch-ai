@@ -65,6 +65,59 @@ def split_sentences(text: str, min_length: int = 4) -> list[str]:
     return sentences
 
 
+# ---------- 语言检测（用于"用户画像必须是单一语言"这个产品要求） ----------
+_CJK_CHAR_PATTERN = re.compile(r"[一-鿿]")
+_LATIN_WORD_PATTERN = re.compile(r"[A-Za-z]+")
+
+# 中文用"字符数"计，拉丁文用"单词数"计——不能两边都按字母数计。
+# 第一版用的是"拉丁字母数"，实测坐实过真实问题：一句中文夹了两三个技术
+# 名词（"Python"、"PyTorch"、"Kubernetes"这种），"Kubernetes"一个词
+# 就占 10 个字母，几个技术名词一凑就能把拉丁字母总数顶到接近中文字数，
+# 明明整句话是中文叙述，占比一算却掉进了"unknown"档。
+# 一个技术专有名词不管多长，在语义上就是"一个词"，权重不该跟它的字母数
+# 挂钩——按单词数（用 [A-Za-z]+ 的匹配次数）计拉丁文分量，跟中文按
+# "字"计数的粒度对齐，一个技术名词只算一个单位，就不会被词长放大。
+_LATIN_WORD_UNIT = 1  # 拉丁文每个词记为这么多个"单位"（对齐中文按字计数的粒度）
+
+# 文本里有效"单位"（中文字数 + 拉丁单词数）总数低于这个数，判定依据太薄弱
+# （比如补充文本只写了几个字），返回 "unknown"，不参与语言一致性判断。
+_MIN_MEANINGFUL_UNITS = 6
+
+# 主导语言的判定用"某一方占比是否明显过半"，不是简单看哪边单位多一点。
+# 阈值 0.55/0.45 是刻意选得不那么严格：一段整体是中文的简历里夹杂正常
+# 技术词汇，只要中文字数依然明显多于拉丁单词数就该判 "zh"。
+_DOMINANT_RATIO_THRESHOLD = 0.55
+
+
+def detect_language(text: str) -> str:
+    """
+    判断一段文本的主导语言，返回 "zh" / "en" / "unknown"。
+
+    判据是"中文字符数" vs "拉丁文单词数"（不是拉丁字母数）的占比——
+    技术名词、公司名、产品名（Python/AWS/PyTorch/Kubernetes 这类）天然是
+    拉丁字母组成，但语义上只是"一个词"，按单词数而不是字母数计入拉丁文
+    分量，才不会因为专有名词本身较长就被放大权重，被误判成"语言混用"。
+    只要中文（或英文）整体占比明显过半就判定为对应语言；两者比例接近
+    （真正的大段中英混排）判 "unknown"。
+
+    有效单位（中文字数+拉丁单词数）总数太少（比如短文本、纯符号、纯数字）
+    也返回 "unknown"，不参与语言一致性判断，避免误伤。
+    """
+    cjk_count = len(_CJK_CHAR_PATTERN.findall(text))
+    latin_word_count = len(_LATIN_WORD_PATTERN.findall(text)) * _LATIN_WORD_UNIT
+    total = cjk_count + latin_word_count
+
+    if total < _MIN_MEANINGFUL_UNITS:
+        return "unknown"
+
+    zh_ratio = cjk_count / total
+    if zh_ratio >= _DOMINANT_RATIO_THRESHOLD:
+        return "zh"
+    if zh_ratio <= (1 - _DOMINANT_RATIO_THRESHOLD):
+        return "en"
+    return "unknown"
+
+
 if __name__ == "__main__":
     # 测试运行：python -m src.core.text_utils
     samples = [

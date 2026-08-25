@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 from src.tab_b_jobsearch.resume_parser import parse_resume_to_markdown
 from src.core.resume_ast import parse_resume_markdown, parse_free_text_note
+from src.core.text_utils import detect_language
+from src.core.profile_language_store import get_profile_language, set_profile_language
 from src.core.vector_store import (
     add_resume_chunks, add_resume_keywords, get_all_resume_chunks, load_resume_keywords,
 )
@@ -29,6 +31,44 @@ RESUMES_DIR = os.path.join(DATA_DIR, "resumes")
 
 # 格式范围收紧：只支持这两种上传格式
 _ALLOWED_RESUME_EXTS = (".pdf", ".md")
+
+_LANGUAGE_LABEL = {"zh": "中文", "en": "英文"}
+
+
+def _check_and_lock_profile_language(text: str) -> None:
+    """
+    产品要求：单个用户的画像（所有已上传简历 + 所有补充文本的合集）必须是
+    单一语言，不能同一个人的画像里混着中文简历和英文简历。
+
+    在真正写入 chunk/keyword 之前调用：
+    - 检测结果是 "unknown"（文本太短/没有明显主导语言）：不拦截，跳过检查。
+    - 画像还没锁定过语言（第一次输入）：把这次检测出的语言直接锁定，不拦截。
+    - 已锁定语言且和这次检测结果一致：不拦截。
+    - 已锁定语言但和这次检测结果不一致：抛 400，不写入任何数据——
+      提前拒绝比"先收进去、打分阶段再悄悄过滤掉"更好，用户能立刻知道
+      原因，不会白传一份简历却看不出匹配分数低是为什么。
+    """
+    detected = detect_language(text)
+    if detected == "unknown":
+        return
+
+    locked = get_profile_language()
+    if locked is None:
+        set_profile_language(detected)
+        return
+
+    if detected != locked:
+        locked_label = _LANGUAGE_LABEL.get(locked, locked)
+        detected_label = _LANGUAGE_LABEL.get(detected, detected)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"你的画像已锁定为{locked_label}，这次提交的内容是{detected_label}，"
+                f"暂不支持混合语言画像。"
+                f" / Your profile is locked to {locked}, but this submission is "
+                f"detected as {detected}. Mixed-language profiles are not supported yet."
+            ),
+        )
 
 
 # ---------- 1. 上传简历（支持多次上传，累加不覆盖） ----------
@@ -63,6 +103,8 @@ async def upload_resume(file: UploadFile = File(...)):
     if not parsed["chunks"] and not parsed["keywords"]:
         raise HTTPException(status_code=400, detail="No extractable content found in this file")
 
+    _check_and_lock_profile_language(markdown_text)
+
     new_chunk_count = add_resume_chunks(parsed["chunks"])
     merged_keywords = add_resume_keywords(parsed["keywords"])
     total_chunks = len(get_all_resume_chunks())
@@ -94,6 +136,8 @@ def add_resume_note(request: AddResumeNoteRequest):
     chunks = parse_free_text_note(request.note_text)
     if not chunks:
         raise HTTPException(status_code=400, detail="没有从补充文本里切出可用的句子")
+
+    _check_and_lock_profile_language(request.note_text)
 
     new_chunk_count = add_resume_chunks(chunks)
     total_chunks = len(get_all_resume_chunks())
