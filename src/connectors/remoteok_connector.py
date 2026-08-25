@@ -136,12 +136,15 @@ def search(
     调 RemoteOK API 拉岗位数据，转成 UnifiedRecord。
 
     参数：
-    - keyword: 可选的岗位关键词过滤（在 position/company/tags 里做子串匹配）。
+    - keyword: 可选的岗位关键词过滤（在 position/company/tags 里做整词匹配）。
       RemoteOK 的 API 不支持服务端关键词过滤，所以是在客户端本地过滤。
       ⚠️ 已知数据源限制（不是代码 bug）：个别岗位的 tags 字段本身会异常地
       塞进几十个不相关标签（比如零售类职位的 tags 里混进 python/golang/
-      medical/sales），会导致关键词过滤出现误召回。如果实测发现这类噪音
-      较多，后续可以考虑只匹配 position/company、不再信任 tags。
+      medical/sales），会导致关键词过滤出现误召回。这里不再靠"删掉 tags"
+      去规避（试过，代价是把只在 tags 里体现相关性的真阳性一起删掉了），
+      而是给每条结果的 UnifiedRecord.matched_via 标出它是靠 title/company/
+      tags 里的哪个（哪些）字段命中的——matched_via 只有 ["tags"] 的结果
+      就是这类可能被标签污染命中的，由使用者自己判断要不要信任。
     - platform_type: "job"（求职）或 "business"（商机），传给 UnifiedRecord
     - max_results: 最多返回多少条
     - only_remote: RemoteOK 本身都是远程岗位，这里参数为了签名一致性预留，
@@ -164,37 +167,49 @@ def search(
     # RemoteOK 的第一项是 API 元信息（"legal" / "0-legal-notice" 之类），跳过。
     jobs = data[1:]
 
+    # 关键词过滤 + 记录每条结果是靠哪个/哪些字段命中的（matched_via）。
+    #
+    # 背景：tags 字段本身不可信——实测发现 RemoteOK 部分职位（比如 "Store
+    # Manager @ JACK & JONES"）的 tags 里被塞了几十个和这条职位完全不相关
+    # 的通用技能标签（python/golang/medical/sales 全堆一起），拿 tags 做
+    # 匹配依据会有假阳性。之前试过干脆不信 tags、只匹配 position/company，
+    # 但这样"降低召回换精度"的代价太大——实测坐实过：搜 "python" 时唯一
+    # 真正相关的那条结果（DESARROLLADOR FULL STACK @ Rekluti）本身就只在
+    # tags 里体现了 python 技能，position/company 里完全没提，删掉 tags
+    # 直接把这条真阳性也搭进去了（2 条变 0 条）。
+    #
+    # 产品这边的原则是"宁可错杀不放过一个"：不再靠删字段去猜语义，tags
+    # 重新纳入匹配范围（不漏召回），但给每条结果标出 matched_via——记录
+    # 这次关键词是在 title/company/tags 里的哪个（哪些）字段命中的。
+    # 一条结果如果 matched_via 只有 ["tags"]（title/company 都没命中），
+    # 就是之前证明过容易踩坑的那类，交给使用者自己判断要不要信任，不在
+    # 连接器这层替它做取舍。
     if keyword:
-        # 按空格拆词、每个词都要命中才保留（不要求相邻/顺序一致）——
-        # 之前是把整个 keyword 当一个短语做连续子串匹配，像 "AI Engineer"
-        # 这种多词短语几乎不会作为连续子串出现在 position/company/tags 里，
-        # 实测直接 0 命中。
-        # 拆词后第一版用的是 `word in haystack` 子串匹配，结果"ai"这种短词
-        # 会命中单词内部片段（实测坐实：匹配到了 "Fire Fighter @ Adani
-        # AIrport" 里的 "Airport"、"MAIntenance" 里的 "ai"），全是假阳性，
-        # 改成整词边界匹配（\b...\b）修掉了。
-        # 但 tags 字段本身不可信——实测发现 RemoteOK 部分职位（比如 "Store
-        # Manager @ JACK & JONES"、"Senior Graphic Designer"）的 tags 里被
-        # 塞了几十个和这条职位完全不相关的通用技能标签（python/golang/
-        # medical/sales 全堆在一起），就算做了整词匹配，只要关键词恰好是
-        # 这堆通用标签之一，照样会被这种"标签污染"命中。这不是匹配算法能
-        # 解决的问题（数据源本身不可信），所以干脆不再拿 tags 做匹配依据，
-        # 只信 position/company 这两个由招聘方直接填写、相对可信的字段。
-        # 代价：如果一条职位真的只在 tags 里体现了相关技能、position/company
-        # 里完全没提，这次改动会漏掉它（真阳性变假阴性）——这是用"降低召回"
-        # 换"提高精度"的取舍，具体命中变化见 __main__ 里的回归测试。
         words = [w for w in keyword.lower().split() if w]
         word_patterns = [re.compile(r"\b" + re.escape(word) + r"\b") for word in words]
-        jobs = [
-            j for j in jobs
-            if all(
-                pattern.search((
-                    (j.get("position") or "") + " " +
-                    (j.get("company") or "")
-                ).lower())
-                for pattern in word_patterns
-            )
-        ]
+
+        def _fields_matching(job: dict) -> list[str]:
+            field_texts = {
+                "title": job.get("position") or "",
+                "company": job.get("company") or "",
+                "tags": " ".join(job.get("tags") or []),
+            }
+            return [
+                name for name, text in field_texts.items()
+                if all(pattern.search(text.lower()) for pattern in word_patterns)
+            ]
+
+        filtered = []
+        for j in jobs:
+            combined = (
+                (j.get("position") or "") + " " +
+                (j.get("company") or "") + " " +
+                " ".join(j.get("tags") or [])
+            ).lower()
+            if all(pattern.search(combined) for pattern in word_patterns):
+                j["_matched_via"] = _fields_matching(j)
+                filtered.append(j)
+        jobs = filtered
 
     records = []
     for job in jobs[:max_results]:
@@ -220,6 +235,7 @@ def search(
             salary=salary,
             remote=True,
             category=category,
+            matched_via=job.get("_matched_via"),
         ))
     return records
 
@@ -256,4 +272,5 @@ if __name__ == "__main__":
         print("posted_at  :", r.posted_at)
         print("category   :", r.category)
         print("url        :", r.url)
+        print("matched_via:", r.matched_via)
         print("content    :", r.content[:200])

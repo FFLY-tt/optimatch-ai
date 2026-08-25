@@ -30,6 +30,9 @@ class UnifiedRecord:
     salary: Optional[str] = None        # 新增：薪资文本（可选，同上）
     remote: Optional[bool] = None       # 新增：是否远程岗位（可选，同上）
     category: Optional[str] = None      # 新增：岗位分类（可选，同上）
+    matched_via: Optional[list[str]] = None  # 新增：关键词搜索命中的字段（如 ["title","tags"]），
+                                              # 只有 remoteok/remotive 这类做关键词过滤的连接器会填；
+                                              # 判断"这条结果靠不靠谱"交给使用者，不在连接器里替它做取舍
 
     def to_dict(self):
         return asdict(self)

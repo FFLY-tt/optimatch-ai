@@ -206,6 +206,8 @@ class JobRecord(BaseModel):
     url: str
     posted_at: str | None
     status: str = "new"
+    matched_via: list[str] = []  # 关键词命中的字段（如 ["title","tags"]）；
+                                  # 目前只有 remoteok/remotive 会填，HN/AnySearch 留空列表
 
 class SearchJobsRequest(BaseModel):
     target_role: str = Field(..., description="Target job direction, e.g. 'AI Engineer'")
@@ -294,6 +296,7 @@ def search_jobs(request: SearchJobsRequest):
             remoteok_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title, content=r.content,
                 url=r.url, posted_at=r.posted_at, status="new",
+                matched_via=r.matched_via or [],
             ))
     except Exception as e:
         print(f"  [调试] RemoteOK 抓取失败: {e}")
@@ -305,6 +308,7 @@ def search_jobs(request: SearchJobsRequest):
             remotive_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title, content=r.content,
                 url=r.url, posted_at=r.posted_at, status="new",
+                matched_via=r.matched_via or [],
             ))
     except Exception as e:
         print(f"  [调试] Remotive 抓取失败: {e}")

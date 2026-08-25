@@ -75,8 +75,11 @@ def search(
     参数：
     - keyword: 可选关键词过滤。Remotive 的 API 支持服务端 search 参数（会在
       标题和正文里搜），所以直接拼进请求让服务端筛选，不用像 RemoteOK 那样
-      客户端过滤——服务端返回的本来就是筛过的结果，这里再加一层 title/tags
-      子串匹配只是保险丝，正常不会再筛掉东西。
+      客户端过滤——服务端返回的本来就是筛过的结果，这里再加一层 title/
+      description 整词匹配只是保险丝。每条结果的 UnifiedRecord.matched_via
+      会标出实际是靠 title/description 里的哪个（哪些）字段命中——只有
+      ["description"]（title 完全没提这个词）的结果，可能是正文里出现了
+      和岗位本身无关的巧合关键词，由使用者自己判断要不要信任。
     - category: 可选 Remotive 分类过滤，Remotive 支持服务端按 category 过滤，
       常用值："software-dev" / "customer-support" / "design" / "marketing"
       等。传了会拼进请求 URL 让服务端返回更少数据。
@@ -101,34 +104,42 @@ def search(
 
     jobs = data.get("jobs") or []
 
+    # 关键词过滤 + 记录每条结果是靠哪个/哪些字段命中的（matched_via）。
+    #
+    # 服务端 search 已经筛过一轮，这里客户端二次确认只匹配 title/description
+    # 这两个由招聘方直接撰写的字段（不含 tags——tags 字段的污染问题和
+    # RemoteOK 是同一类，Lemon.io 这类雇主的职位 tags 里塞了几十个不相关
+    # 技能标签，其中通用的 "AI/ML" 标签会导致搜 "AI Engineer" 时误判命中）。
+    # 用整词边界匹配（\b...\b），不能用普通子串 `in` 判断——实测在 RemoteOK
+    # 那边坐实过："ai" 这种短词当子串会命中 "Airport" 这类单词内部片段。
+    #
+    # 之前也试过干脆删掉 description 里容易被误伤的部分，但实测发现
+    # description 里的假阳性根源不是字段本身，是自由文本里出现了和岗位
+    # 无关的巧合关键词（比如公司简介提"我们用 ai 提升效率"，但岗位跟 AI
+    # 工程师毫无关系）——这种"文本本身提到但跟岗位不相关"的假阳性，删字段
+    # 治不了，只能标出来交给使用者判断：matched_via 只有 ["description"]
+    # （title 里完全没提这个词）的结果，就是这类需要多留意的候选。
     if keyword:
-        # 服务端 search 已经筛过一轮，这里只是兜底二次确认（防止服务端匹配
-        # 逻辑比预期宽松，比如搜正文命中了标题里完全不相关的结果）。
-        # 按空格拆词、每个词都要命中才保留（不要求相邻/顺序一致），和
-        # RemoteOK 连接器的过滤逻辑保持一致——避免同样一个多词短语在
-        # 两个连接器里一个能匹配、一个匹配不到的不一致行为。
-        # 用整词边界匹配（\b...\b），不能用普通子串 `in` 判断——实测在
-        # RemoteOK 那边坐实过："ai" 这种短词当子串会命中 "Airport"、
-        # "Maintenance" 这类单词内部片段，全是假阳性。
-        # 不再把 tags 纳入匹配范围——实测发现 Lemon.io 这类雇主的职位（比如
-        # "Senior Golang Developer"、"Tech Lead Full-Stack Rails Engineer"）
-        # tags 里塞了几十个不相关技能标签，其中一个通用的 "AI/ML" 标签导致
-        # 搜 "AI Engineer" 时被误判命中。和 RemoteOK 一样，只信 title/
-        # description 这两个由招聘方直接撰写的字段，tags 这类可能被污染的
-        # 字段不再作为匹配依据（换来精度，可能损失一部分只在 tags 里体现
-        # 相关性的真阳性）。
         words = [w for w in keyword.lower().split() if w]
         word_patterns = [re.compile(r"\b" + re.escape(word) + r"\b") for word in words]
-        jobs = [
-            j for j in jobs
-            if all(
-                pattern.search((
-                    (j.get("title") or "") + " " +
-                    (j.get("description") or "")
-                ).lower())
-                for pattern in word_patterns
-            )
-        ]
+
+        def _fields_matching(job: dict) -> list[str]:
+            field_texts = {
+                "title": job.get("title") or "",
+                "description": job.get("description") or "",
+            }
+            return [
+                name for name, text in field_texts.items()
+                if all(pattern.search(text.lower()) for pattern in word_patterns)
+            ]
+
+        filtered = []
+        for j in jobs:
+            combined = ((j.get("title") or "") + " " + (j.get("description") or "")).lower()
+            if all(pattern.search(combined) for pattern in word_patterns):
+                j["_matched_via"] = _fields_matching(j)
+                filtered.append(j)
+        jobs = filtered
 
     records = []
     for job in jobs[:max_results]:
@@ -155,6 +166,7 @@ def search(
             salary=salary,
             remote=True,
             category=cat,
+            matched_via=job.get("_matched_via"),
         ))
     return records
 
@@ -193,4 +205,5 @@ if __name__ == "__main__":
         print("posted_at  :", r.posted_at)
         print("category   :", r.category)
         print("url        :", r.url)
+        print("matched_via:", r.matched_via)
         print("content    :", r.content[:200])
