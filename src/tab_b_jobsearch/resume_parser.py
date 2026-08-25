@@ -1,79 +1,45 @@
 """
 简历解析器。
-用 pdfplumber 提取 PDF 文本，做基础清洗。
+用 pymupdf4llm 把 PDF 转成 Markdown 文本（取代原来的 pdfplumber 纯文本方案）——
+Markdown 输出保留了标题层级/加粗/列表这些结构信息，AST 解析（resume_ast.py）
+需要这些结构信息才能拆出 company/role/time 三层，纯文本方案做不到这一点。
 
-注意：pdfplumber 默认只提取文字，不会读取图片内容（头像、图标等），
-这正是我们想要的效果，不需要额外处理照片。
-
-如果简历是双栏/表格排版，提取出来的文字顺序可能和视觉顺序不完全一致，
-这是已知局限，不是本周要解决的重点——先跑通看效果，效果不好再针对性优化。
+.md 文件不需要转换，读进来的文本本身就是要解析的 Markdown。
 """
 
-import pdfplumber
-import re
+import pymupdf4llm
 
 
-def parse_resume(pdf_path: str) -> str:
+def parse_resume_to_markdown(file_path: str, file_ext: str) -> str:
     """
-    解析 PDF 简历，返回清洗后的纯文本。
+    把上传的简历文件解析成 Markdown 文本。
+    file_ext: ".pdf" 或 ".md"（调用方保证只传这两种，格式范围已在上传接口收紧）
     """
-    all_text = []
+    if file_ext == ".md":
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
 
-    with pdfplumber.open(pdf_path) as pdf:
-        print(f"  [调试] PDF 共 {len(pdf.pages)} 页")
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text()
-            if text:
-                all_text.append(text)
-            else:
-                print(f"  [调试] 第 {i+1} 页没提取到文字（可能是纯图片页）")
+    if file_ext == ".pdf":
+        md_text = pymupdf4llm.to_markdown(file_path)
+        return md_text.strip()
 
-    raw_text = "\n".join(all_text)
-    clean_text = _clean_text(raw_text)
-    return clean_text
-
-
-def _clean_text(text: str) -> str:
-    """
-    基础清洗：
-    - 把多个连续空行压缩成一个
-    - 去掉每行首尾多余空格
-    - 去掉一些常见的乱码/特殊符号
-    """
-    lines = text.split("\n")
-    cleaned_lines = [line.strip() for line in lines]
-    # 去掉空行堆积（连续多个空行只保留一个）
-    result_lines = []
-    prev_empty = False
-    for line in cleaned_lines:
-        if line == "":
-            if not prev_empty:
-                result_lines.append(line)
-            prev_empty = True
-        else:
-            result_lines.append(line)
-            prev_empty = False
-
-    cleaned = "\n".join(result_lines)
-    # 去掉一些 PDF 提取常见的乱码字符
-    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", cleaned)
-    return cleaned.strip()
+    raise ValueError(f"不支持的文件格式: {file_ext}（只支持 .pdf 和 .md）")
 
 
 if __name__ == "__main__":
-    # 测试运行：python -m src.resume_parser
+    # 测试运行：python -m src.tab_b_jobsearch.resume_parser
     import os
 
-    pdf_path = os.path.join(os.path.dirname(__file__), "..", "data", "Fangyu_Lin_CV.pdf")
+    pdf_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "Fangyu_Lin_CV.pdf")
 
     if not os.path.exists(pdf_path):
         print(f"没找到文件: {pdf_path}")
         print("确认文件名和路径是否正确")
     else:
         print(f"正在解析: {pdf_path}\n")
-        result = parse_resume(pdf_path)
+        result = parse_resume_to_markdown(pdf_path, ".pdf")
         print("=" * 60)
-        print("解析结果（前 1000 字）：\n")
-        print(result[:1000])
+        print("解析结果（前 1500 字）：\n")
+        print(result[:1500])
         print("\n" + "=" * 60)
         print(f"总字数: {len(result)}")

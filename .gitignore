@@ -223,6 +223,8 @@ data/chroma_db/
 data/uploaded_resume.pdf
 data/exports/
 data/status_store.json
+data/resumes/
+data/resume_keywords.json
 API.txt 
 
 data/chroma_db/

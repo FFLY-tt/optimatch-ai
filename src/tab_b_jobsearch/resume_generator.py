@@ -36,6 +36,9 @@ match the job description, following these strict rules:
 7. Keep the tone professional and concise, in standard resume bullet-point style.
 8. Output ONLY the tailored resume content (relevant experience/project bullets), no preamble, \
    no explanation.
+9. Output MUST be in Markdown format: use "**Company / Project**" style bold lines for each \
+   entry header (include role/time if given in the source excerpts), and "- " bullet points for \
+   each achievement. Do not use HTML tags.
 """
 
 
@@ -58,19 +61,43 @@ ISSUE: <if any is No, briefly describe the problem in one sentence, else write "
 """
 
 
+def _format_chunk_for_prompt(chunk: dict) -> str:
+    """
+    把一条 {"text", "tags"} 格式的 chunk 拼成一行"带上下文"的文本喂给 LLM，
+    比如 "[ByteDance | Backend Engineer | Jan 2024 - Present] Built a scalable ..."。
+    tags 里有 company/role/time 的按顺序拼前缀；只有 source（用户补充自由文本，
+    没有公司/项目结构）的，前缀就是 "[User supplement]"；两者都没有就不加前缀。
+    """
+    tags = chunk.get("tags") or {}
+    parts = [tags.get(k) for k in ("company", "role", "time") if tags.get(k)]
+    if parts:
+        prefix = "[" + " | ".join(parts) + "] "
+    elif tags.get("source") == "user_supplement":
+        prefix = "[User supplement] "
+    else:
+        prefix = ""
+    return f"{prefix}{chunk['text']}"
+
+
 def generate_tailored_resume(
     original_chunks: list[dict],
     job_description: str,
+    extra_context: str = "",
     max_retries: int = 1,
 ) -> dict:
     """
     生成定制简历，带自我反思质量校验。
 
-    original_chunks: retriever.hybrid_search() 返回的检索结果（相关简历片段）
+    original_chunks: match_scoring.score_resume_chunks_against_jd() 返回的
+        排序后的简历 chunk 列表（[{"text", "tags", "score"}, ...]）
     job_description: 目标职位描述文本
+    extra_context: 用户在前端补充的额外说明（可选），比如"这份工作我更想强调
+        团队协作经历"。只是作为额外提示词参考，不是简历事实来源——
+        TAILOR_SYSTEM_PROMPT 的规则 6 已经明确"简历原文是唯一事实来源"，
+        这里补充的说明只影响"选择强调什么/怎么措辞"，不会凭空引入新内容。
     返回: {"tailored_resume": "...", "passed_review": bool, "issue": "...", "attempts": int}
     """
-    original_text = "\n\n".join(c["content"] for c in original_chunks)
+    original_text = "\n\n".join(_format_chunk_for_prompt(c) for c in original_chunks)
 
     attempt = 0
     tailored_resume = ""
@@ -83,7 +110,8 @@ def generate_tailored_resume(
         user_prompt = (
             f"Original resume excerpts:\n{original_text}\n\n"
             f"Job description:\n{job_description}\n\n"
-            f"Rewrite the resume content to best match this job description, "
+            + (f"Additional context from the candidate:\n{extra_context}\n\n" if extra_context.strip() else "")
+            + f"Rewrite the resume content to best match this job description, "
             f"following the rules above."
         )
         tailored_resume = chat(
@@ -122,9 +150,11 @@ def generate_tailored_resume(
 
 
 if __name__ == "__main__":
-    # 测试运行：python -m src.resume_generator
-    # 先确保已经跑过 python -m src.vector_store 把简历存进 Chroma 了
-    from src.core.retriever import hybrid_search
+    # 测试运行：python -m src.tab_b_jobsearch.resume_generator
+    # 先确保已经跑过一次简历上传流程，resume_chunks collection 里有数据
+    from src.core.vector_store import get_all_resume_chunks, load_resume_keywords
+    from src.core.jd_parser import parse_job_description
+    from src.core.match_scoring import score_resume_chunks_against_jd
 
     test_job_description = (
         "We are looking for a backend engineer with strong Python experience, "
@@ -133,7 +163,10 @@ if __name__ == "__main__":
     )
 
     print("正在检索相关简历片段...")
-    matches = hybrid_search(test_job_description, final_top_k=3)
+    chunks = get_all_resume_chunks()
+    keywords = load_resume_keywords()
+    jd_parsed = parse_job_description(test_job_description)
+    matches = score_resume_chunks_against_jd(chunks, keywords, jd_parsed, top_k=3)
 
     print("正在生成定制简历（含自我反思校验）...\n")
     result = generate_tailored_resume(matches, test_job_description)

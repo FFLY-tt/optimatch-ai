@@ -7,6 +7,10 @@
 速度快、效果够用，适合 MVP 阶段。
 """
 
+import json
+import os
+import uuid
+
 import chromadb
 from sentence_transformers import SentenceTransformer
 
@@ -14,6 +18,12 @@ _model = None
 _client = None
 
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+# 简历 AST 解析产出的 chunk（句子 + tags）用的独立 collection，
+# 和 build_resume_collection() 那个"按 section 整段存、每次覆盖"的旧方案
+# （Tab A 业务档案还在用）分开，互不干扰。
+RESUME_CHUNKS_COLLECTION = "resume_chunks"
+KEYWORDS_STORE_PATH = os.path.join("data", "resume_keywords.json")
 
 
 def get_model() -> SentenceTransformer:
@@ -34,8 +44,11 @@ def get_chroma_client():
 
 def build_resume_collection(chunks: list[dict], collection_name: str = "resume") -> None:
     """
-    把简历切块结果存进 Chroma。
-    chunks: chunker.py 输出的格式 [{"section": "...", "content": "..."}]
+    把整段式切块结果存进 Chroma（每次调用先清空旧数据再整批写入）。
+    目前给 Tab A 业务档案（tab_a_outreach/business_profile.py）用；
+    简历那边已经改用 add_resume_chunks()（累加式存储，见下方），
+    不再用这个函数。
+    chunks: [{"section": "...", "content": "..."}]
     """
     client = get_chroma_client()
     model = get_model()
@@ -81,15 +94,110 @@ def search_resume(query_text: str, collection_name: str = "resume", top_k: int =
     return matches
 
 
-if __name__ == "__main__":
-    # 测试运行：python -m src.vector_store
-    import os
-    from src.tab_b_jobsearch.resume_parser import parse_resume
-    from src.core.chunker import chunk_resume
+def _flatten_tags(tags: dict) -> dict:
+    """
+    Chroma 的 metadata 只接受标量值（str/int/float/bool），不能直接存嵌套 dict，
+    也不接受 None。resume_ast.py / jd_parser.py 产出的 tags 里经常有 None
+    （比如没抠到 role），这里统一转成空字符串再存。
+    """
+    return {k: ("" if v is None else v) for k, v in tags.items()}
 
-    pdf_path = os.path.join(os.path.dirname(__file__), "..", "data", "Fangyu_Lin_CV.pdf")
-    text = parse_resume(pdf_path)
-    chunks = chunk_resume(text)
+
+def add_resume_chunks(chunks: list[dict], collection_name: str = RESUME_CHUNKS_COLLECTION) -> int:
+    """
+    追加一批简历/用户补充文本的 chunk 到 Chroma——不删除已有数据。
+    支持多次上传简历、多次补充自由文本时持续累积，而不是每次覆盖。
+
+    chunks: [{"text": str, "tags": dict}, ...]
+        （resume_ast.parse_resume_markdown()["chunks"] 或
+         resume_ast.parse_free_text_note() 的产出格式）
+    返回：本次新增的 chunk 数量
+    """
+    if not chunks:
+        return 0
+
+    client = get_chroma_client()
+    model = get_model()
+    collection = client.get_or_create_collection(collection_name)
+
+    texts = [c["text"] for c in chunks]
+    embeddings = model.encode(texts).tolist()
+    ids = [f"chunk_{uuid.uuid4().hex}" for _ in chunks]
+    metadatas = [_flatten_tags(c.get("tags", {})) for c in chunks]
+
+    collection.add(ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas)
+    print(f"  [调试] 追加 {len(chunks)} 条 chunk 到 Chroma collection '{collection_name}'（累计存储，不清空旧数据）")
+    return len(chunks)
+
+
+def get_all_resume_chunks(collection_name: str = RESUME_CHUNKS_COLLECTION) -> list[dict]:
+    """
+    取出当前累计的全部简历/补充文本 chunk（不含 embedding，match_scoring.py
+    需要用的时候自己现算——corpus 通常就几十上百条，重新编码成本很低，
+    没必要依赖 Chroma 能不能把已存的 embedding 原样吐回来这种细节）。
+    collection 还没建过（用户还没上传过简历）时返回空列表，不抛异常。
+    """
+    client = get_chroma_client()
+    try:
+        collection = client.get_collection(collection_name)
+    except Exception:
+        return []
+
+    result = collection.get(include=["documents", "metadatas"])
+    chunks = []
+    for doc_id, text, meta in zip(result["ids"], result["documents"], result["metadatas"]):
+        chunks.append({"id": doc_id, "text": text, "tags": meta})
+    return chunks
+
+
+def reset_resume_chunks(collection_name: str = RESUME_CHUNKS_COLLECTION) -> None:
+    """清空简历 chunk 存储（测试用，或者用户想整个重来）。"""
+    client = get_chroma_client()
+    try:
+        client.delete_collection(collection_name)
+    except Exception:
+        pass
+
+
+def load_resume_keywords() -> set[str]:
+    """加载持久化的 keyword 集合（Region A 结构化字段：学历/学校/技术栈）。"""
+    if not os.path.exists(KEYWORDS_STORE_PATH):
+        return set()
+    with open(KEYWORDS_STORE_PATH, "r", encoding="utf-8") as f:
+        return set(json.load(f))
+
+
+def add_resume_keywords(keywords: set[str]) -> set[str]:
+    """
+    把新解析出的 keyword 集合并入持久化存储（取并集，不覆盖）——
+    多份简历的 keyword 应该是并集，不是最后一份覆盖前面的。
+    返回合并后的完整集合。
+    """
+    existing = load_resume_keywords()
+    merged = existing | keywords
+    os.makedirs(os.path.dirname(KEYWORDS_STORE_PATH), exist_ok=True)
+    with open(KEYWORDS_STORE_PATH, "w", encoding="utf-8") as f:
+        json.dump(sorted(merged), f, ensure_ascii=False, indent=2)
+    return merged
+
+
+def reset_resume_keywords() -> None:
+    """清空 keyword 持久化存储（测试用，或者用户想整个重来）。"""
+    if os.path.exists(KEYWORDS_STORE_PATH):
+        os.remove(KEYWORDS_STORE_PATH)
+
+
+if __name__ == "__main__":
+    # 测试运行：python -m src.core.vector_store
+    # build_resume_collection() 现在主要给 Tab A 业务档案（{"section","content"}
+    # 这种整段式 chunk）用，简历那边已经改用 add_resume_chunks()
+    # （见 src/core/resume_ast.py + src/core/match_scoring.py），
+    # 这里用几条手写样例做自测，不再依赖已经废弃的 chunker.py。
+    chunks = [
+        {"section": "EXPERIENCE", "content": "Built a scalable data pipeline using Apache Spark and LangChain to power an autonomous AI agent workflow."},
+        {"section": "SKILLS", "content": "Python, Docker, Kubernetes, CI/CD pipelines, LangGraph."},
+        {"section": "EDUCATION", "content": "Master of Computer Science, Ontario Tech University."},
+    ]
 
     print(f"\n正在向量化并存入 Chroma（共 {len(chunks)} 块）...")
     build_resume_collection(chunks)
