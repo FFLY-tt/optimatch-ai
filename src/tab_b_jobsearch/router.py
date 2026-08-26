@@ -318,8 +318,6 @@ def search_jobs(request: SearchJobsRequest):
     except Exception as e:
         print(f"  [调试] Remotive 抓取失败: {e}")
 
-    all_jobs = hn_jobs + anysearch_jobs + remoteok_jobs + remotive_jobs
-
     # 产品要求：不做硬过滤（不把低匹配度的职位从列表里删掉），只排序+标注，
     # 让用户自己判断要不要点进去——跟 matched_via 那次的设计原则一致，
     # 系统不替用户做"删除"决定。
@@ -336,18 +334,40 @@ def search_jobs(request: SearchJobsRequest):
         )
         return SearchJobsResponse(jobs=jobs, total=len(jobs), profile_scored=False)
 
-    # 跨来源按 url 去重（和 _round_robin_merge 里的去重逻辑保持一致：
-    # 保留先出现的那条，空 url 不参与去重判断），再逐条打分。
+    # 实测坐实过一次真实的设计回归：改成"全部候选按 fit_score 全局排序再
+    # 截断"之后，HN 一路单独就能产出几十条候选，足够填满 max_results，
+    # 导致 AnySearch 这种候选量小但真实有效的来源被完全挤出响应——不是它
+    # 没搜到东西，是排序+截断这一步让它连出现的机会都没有。这跟当初接入
+    # AnySearch 的初衷（它是四路里唯一没有供给量天花板的来源）直接冲突。
+    #
+    # 改成"每路来源内部按 fit_score 排序 + 跨来源 round-robin 合并"两者
+    # 结合，不是二选一：
+    # 1. 每路来源各自按 url 去重（沿用原来的去重逻辑，四路共用同一个
+    #    seen_urls，按 hn -> anysearch -> remoteok -> remotive 的顺序
+    #    去重优先级不变）。
+    # 2. 每路各自打分。
+    # 3. 每路各自按 fit_score 从高到低排序（这一步决定"这路里最先给的是
+    #    最匹配的"）。
+    # 4. 排好的四路列表交给原来的 _round_robin_merge 跨来源轮流取——
+    #    这一步保证"只要某路有数据就有基本入选机会"，不会被候选量大的
+    #    来源完全挤没。
     seen_urls: set[str] = set()
-    deduped_jobs: list[JobRecord] = []
-    for job in all_jobs:
-        if job.url and job.url in seen_urls:
-            continue
-        if job.url:
-            seen_urls.add(job.url)
-        deduped_jobs.append(job)
 
-    for job in deduped_jobs:
+    def _dedup(jobs: list[JobRecord]) -> list[JobRecord]:
+        result = []
+        for job in jobs:
+            if job.url and job.url in seen_urls:
+                continue
+            if job.url:
+                seen_urls.add(job.url)
+            result.append(job)
+        return result
+
+    per_source_deduped = [
+        _dedup(hn_jobs), _dedup(anysearch_jobs), _dedup(remoteok_jobs), _dedup(remotive_jobs),
+    ]
+
+    for job in [j for source_jobs in per_source_deduped for j in source_jobs]:
         if not job.content.strip():
             # content 为空的记录没法解析 JD、更没法打分——fit_score/fit_label
             # 保持 None，不能当成"打出了一个很低的分"，两者语义不一样。
@@ -357,12 +377,13 @@ def search_jobs(request: SearchJobsRequest):
         job.fit_score = fit
         job.fit_label = fit_score_to_label(fit)
 
-    # 有画像时按 fit_score 从高到低整体排序，fit_score 为 None 的排最后
-    # （不跟有分数的混排——sort key 用 (是否为None, -分数) 这种技巧：
-    # None 的 key 第一项是 True(=1)，排在 False(=0) 后面；用负数让分数
-    # 本身还是降序）。
-    deduped_jobs.sort(key=lambda j: (j.fit_score is None, -(j.fit_score or 0.0)))
-    jobs = deduped_jobs[: request.max_results]
+    # sort key 用 (是否为None, -分数) 这种技巧：None 的 key 第一项是
+    # True(=1)，排在 False(=0) 后面；用负数让分数本身还是降序。
+    def _sort_by_fit(jobs: list[JobRecord]) -> list[JobRecord]:
+        return sorted(jobs, key=lambda j: (j.fit_score is None, -(j.fit_score or 0.0)))
+
+    sorted_per_source = [_sort_by_fit(source_jobs) for source_jobs in per_source_deduped]
+    jobs = _round_robin_merge(sorted_per_source, limit=request.max_results)
 
     return SearchJobsResponse(jobs=jobs, total=len(jobs), profile_scored=True)
 
