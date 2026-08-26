@@ -168,6 +168,82 @@ def score_resume_chunks_against_jd(
     return scored[:top_k]
 
 
+def compute_fit_score(
+    resume_chunks: list[dict],
+    resume_keywords: set[str],
+    jd_parsed: dict,
+    top_k: int = 5,
+) -> float | None:
+    """
+    给"一份简历 vs 一条 JD"算一个代表这条 JD 整体匹配度的单一分数（用在
+    /api/search-jobs 的排序上，不是 /api/tailor-resume 那种"挑最相关的几句
+    喂给 LLM"的场景，所以聚合方式不一样）。
+
+    聚合方式选的是 top_k 分数的【平均值】，不是单条最高分：
+    - 单条最高分只要简历里有一句话跟 JD 里某一句凑巧很像就能拿高分，
+      哪怕整体经历方向完全不对——比如简历里一句很泛的话（"负责团队协作与
+      项目交付"）可能跟任何 JD 都能凑出不错的相似度，最高分会被这种"泛话"
+      带偏，掩盖掉"这份简历整体是不是真的适配这条 JD"。
+    - 取 top_k 平均，相当于看"简历里最相关的一批经历，整体上跟这条 JD
+      有多贴"，能更好地把"平台工程 vs 数据工程"这种方向性不对口的情况
+      和真正对口的情况分开。
+    - 这个选择不是拍脑袋定的：用真实数据验证过（Zhibin Liu 数据工程背景
+      简历，分别对 Proxima Fusion 平台工程岗和 Comcast/FreeWheel 数据工程
+      岗打分），平均值聚合下两条参照 JD 的分数区分明显，具体数字见
+      router.py 里 fit_label 分档的注释。
+
+    resume_chunks 为空、或 JD 没有可用句子（jd_parsed["sentences"] 为空，
+    比如 content 是空字符串）都返回 None——调用方应该把这种"没法打分"的
+    情况和"打出了一个低分"区分开，不能混为一谈。
+    """
+    if not resume_chunks or not jd_parsed.get("sentences"):
+        return None
+
+    scored = score_resume_chunks_against_jd(resume_chunks, resume_keywords, jd_parsed, top_k=top_k)
+    if not scored:
+        return None
+
+    return sum(c["score"] for c in scored) / len(scored)
+
+
+# ---------- fit_score 分档（/api/search-jobs 排序用，只做标注不做过滤） ----------
+#
+# 用 Zhibin Liu 这份真实数据工程背景简历（11 条 chunk）实测校准过：
+#   - Proxima Fusion（平台工程岗，要 K8s/CI-CD/IaC，方向不对口）
+#     fit_score = 0.4327 —— 这条之前走 /api/tailor-resume 时"审核未通过"，
+#     确认是真实的低匹配案例
+#   - 一条通用后端岗（TypeScript/Node/Postgres 游戏服务器托管，同样方向
+#     不对口）fit_score = 0.4038 —— 独立验证了"弱匹配"这一档的下界
+#   - Comcast/FreeWheel Lead Data Engineer（Flink/Kafka/ETL，数据工程对口）
+#     fit_score = 0.5851 —— 这条之前 passed_review: true，确认是真实的
+#     高匹配案例
+#
+# 中间"一般匹配"这一档没能找到一个干净的真实参照点——试过两个候选都被
+# 数据源本身的噪音污染了（一条是 LinkedIn 中文界面文案，不是真实 JD 正文；
+# 另一条 Turing 的帖子疑似带了"我们客户覆盖各种技术栈"的通用页脚文案，
+# tech_stack 命中了一堆和这条岗位实际职责无关的关键词，分数被异常拉高到
+# 0.8+，明显不可信）。如实说明：中间档的边界是在两个已验证锚点的中点
+# （(0.4327+0.5851)/2 ≈ 0.509）附近取的，不是又一个独立验证过的锚点，
+# 后面如果找到更干净的中间案例，应该用来复核这两条边界。
+FIT_SCORE_WEAK_MAX = 0.45     # < 此值：弱匹配
+FIT_SCORE_STRONG_MIN = 0.55   # >= 此值：强匹配（中间是一般匹配）
+
+FIT_LABEL_WEAK = "弱匹配"
+FIT_LABEL_MEDIUM = "一般匹配"
+FIT_LABEL_STRONG = "强匹配"
+
+
+def fit_score_to_label(fit_score: float | None) -> str | None:
+    """fit_score 为 None（没法打分）时返回 None，调用方不应该当成"弱匹配"处理。"""
+    if fit_score is None:
+        return None
+    if fit_score < FIT_SCORE_WEAK_MAX:
+        return FIT_LABEL_WEAK
+    if fit_score >= FIT_SCORE_STRONG_MIN:
+        return FIT_LABEL_STRONG
+    return FIT_LABEL_MEDIUM
+
+
 if __name__ == "__main__":
     # 测试运行：python -m src.core.match_scoring
     # 先确保已经跑过一次简历上传流程，resume_chunks collection 里有数据

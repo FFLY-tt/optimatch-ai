@@ -15,7 +15,7 @@ from src.core.vector_store import (
     add_resume_chunks, add_resume_keywords, get_all_resume_chunks, load_resume_keywords,
 )
 from src.core.jd_parser import parse_job_description
-from src.core.match_scoring import score_resume_chunks_against_jd
+from src.core.match_scoring import score_resume_chunks_against_jd, compute_fit_score, fit_score_to_label
 from src.tab_b_jobsearch.resume_generator import generate_tailored_resume
 from src.connectors.hn_connector import fetch_hn_jobs
 from src.connectors.remoteok_connector import search as remoteok_search
@@ -208,6 +208,9 @@ class JobRecord(BaseModel):
     status: str = "new"
     matched_via: list[str] = []  # 关键词命中的字段（如 ["title","tags"]）；
                                   # 目前只有 remoteok/remotive 会填，HN/AnySearch 留空列表
+    fit_score: float | None = None   # 跟当前简历画像的匹配度原始分数，供排序用；
+                                      # None 表示没法打分（没有画像 / 这条 content 为空）
+    fit_label: str | None = None     # "强匹配"/"一般匹配"/"弱匹配"，None 同上
 
 class SearchJobsRequest(BaseModel):
     target_role: str = Field(..., description="Target job direction, e.g. 'AI Engineer'")
@@ -217,6 +220,8 @@ class SearchJobsRequest(BaseModel):
 class SearchJobsResponse(BaseModel):
     jobs: list[JobRecord]
     total: int
+    profile_scored: bool  # False 表示用户还没有简历画像数据，fit_score/fit_label 全是 None，
+                           # 结果按原来的 round-robin 方式合并，没有按匹配度排序
 
 def _round_robin_merge(source_lists: list[list[JobRecord]], limit: int) -> list[JobRecord]:
     """
@@ -313,11 +318,53 @@ def search_jobs(request: SearchJobsRequest):
     except Exception as e:
         print(f"  [调试] Remotive 抓取失败: {e}")
 
-    jobs = _round_robin_merge(
-        [hn_jobs, anysearch_jobs, remoteok_jobs, remotive_jobs],
-        limit=request.max_results,
-    )
-    return SearchJobsResponse(jobs=jobs, total=len(jobs))
+    all_jobs = hn_jobs + anysearch_jobs + remoteok_jobs + remotive_jobs
+
+    # 产品要求：不做硬过滤（不把低匹配度的职位从列表里删掉），只排序+标注，
+    # 让用户自己判断要不要点进去——跟 matched_via 那次的设计原则一致，
+    # 系统不替用户做"删除"决定。
+    resume_chunks = get_all_resume_chunks()
+    resume_keywords = load_resume_keywords()
+    profile_scored = bool(resume_chunks or resume_keywords)
+
+    if not profile_scored:
+        # 用户还没上传过简历/补充资料，没法打分——维持原来的 round-robin
+        # 合并方式，不查分数（省掉大量不必要的 embedding 计算）。
+        jobs = _round_robin_merge(
+            [hn_jobs, anysearch_jobs, remoteok_jobs, remotive_jobs],
+            limit=request.max_results,
+        )
+        return SearchJobsResponse(jobs=jobs, total=len(jobs), profile_scored=False)
+
+    # 跨来源按 url 去重（和 _round_robin_merge 里的去重逻辑保持一致：
+    # 保留先出现的那条，空 url 不参与去重判断），再逐条打分。
+    seen_urls: set[str] = set()
+    deduped_jobs: list[JobRecord] = []
+    for job in all_jobs:
+        if job.url and job.url in seen_urls:
+            continue
+        if job.url:
+            seen_urls.add(job.url)
+        deduped_jobs.append(job)
+
+    for job in deduped_jobs:
+        if not job.content.strip():
+            # content 为空的记录没法解析 JD、更没法打分——fit_score/fit_label
+            # 保持 None，不能当成"打出了一个很低的分"，两者语义不一样。
+            continue
+        jd_parsed = parse_job_description(job.content)
+        fit = compute_fit_score(resume_chunks, resume_keywords, jd_parsed, top_k=5)
+        job.fit_score = fit
+        job.fit_label = fit_score_to_label(fit)
+
+    # 有画像时按 fit_score 从高到低整体排序，fit_score 为 None 的排最后
+    # （不跟有分数的混排——sort key 用 (是否为None, -分数) 这种技巧：
+    # None 的 key 第一项是 True(=1)，排在 False(=0) 后面；用负数让分数
+    # 本身还是降序）。
+    deduped_jobs.sort(key=lambda j: (j.fit_score is None, -(j.fit_score or 0.0)))
+    jobs = deduped_jobs[: request.max_results]
+
+    return SearchJobsResponse(jobs=jobs, total=len(jobs), profile_scored=True)
 
 
 # ---------- 5. 导出简历（docx / md / pdf 三选一，都保留） ----------
