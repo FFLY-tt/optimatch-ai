@@ -1,0 +1,15 @@
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: #fdf8f3;
+  color: #2e2621;
+  font-family: 'IBM Plex Sans', system-ui, 'Segoe UI', sans-serif;
+  font-weight: 500;
+}
+
+#root {
+  min-height: 100vh;
+}

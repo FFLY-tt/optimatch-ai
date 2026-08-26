@@ -1,0 +1,539 @@
+/* ============================================================
+   Design tokens
+   ============================================================ */
+:root {
+  --bg: #fdf8f3;
+  --panel: #ffffff;
+  --raised: #fbf3ed;
+  --border: #b9afa4;
+  --border-soft: #d8cfc5;
+  --text: #2e2621;
+  --text-muted: #6e6259;
+  --text-faint: #a79a8e;
+
+  --mint: #8fddbb;
+  --mint-ink: #1e5b41;
+  --mint-tint: #eaf9f1;
+
+  --lavender: #c4b3ea;
+  --lavender-ink: #4a3a82;
+  --lavender-tint: #f3effc;
+
+  --straw: #f7a9ae;
+  --straw-ink: #8a2e38;
+  --straw-tint: #fdeff0;
+
+  --radius-card: 11px;
+  --radius-frame: 28px;
+  --shadow-card: 0 2px 10px rgba(120, 100, 80, 0.07);
+
+  --ease: 150ms ease;
+  --ease-fast: 100ms ease;
+
+  --font-display: 'Space Grotesk', 'IBM Plex Sans', sans-serif;
+  --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.app {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 40px 20px 96px;
+  font-family: var(--font-body);
+}
+
+.app > h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 26px;
+  margin: 0 0 28px 8px;
+  color: var(--text);
+}
+
+/* ============================================================
+   外层大框——三个 stage 都装在这一个圆角框里
+   ============================================================ */
+.mega-frame {
+  border: 3px solid var(--border);
+  border-radius: var(--radius-frame);
+  padding: 40px 40px 40px 72px;
+}
+
+.stage {
+  position: relative;
+  margin-bottom: 44px;
+}
+.stage:last-child {
+  margin-bottom: 0;
+}
+
+.stage__badge {
+  position: absolute;
+  left: -52px;
+  top: 2px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 13px;
+  background: var(--panel);
+  color: var(--text-muted);
+}
+
+.stage__header {
+  margin-bottom: 16px;
+}
+.stage__title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 19px;
+  margin: 0 0 4px;
+  color: var(--text);
+}
+.stage__subtitle {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 0;
+}
+
+.stage__card {
+  background: var(--panel);
+  border: 2px solid var(--border-soft);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  padding: 24px 28px;
+}
+
+/* 每个 stage 的强调色：徽章描边/底色 + 标题色 */
+.stage[data-accent='mint'] .stage__badge {
+  border-color: var(--mint);
+  background: var(--mint-tint);
+  color: var(--mint-ink);
+}
+.stage[data-accent='lavender'] .stage__badge {
+  border-color: var(--lavender);
+  background: var(--lavender-tint);
+  color: var(--lavender-ink);
+}
+.stage[data-accent='straw'] .stage__badge {
+  border-color: var(--straw);
+  background: var(--straw-tint);
+  color: var(--straw-ink);
+}
+
+.subsection {
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.subsection:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+.subsection h3 {
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  font-weight: 600;
+  margin: 0 0 12px;
+  color: var(--text);
+}
+
+/* ============================================================
+   表单控件
+   ============================================================ */
+.control-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.form-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+input[type='text'],
+input[type='number'],
+input[type='file'],
+input:not([type]),
+textarea {
+  font: inherit;
+  font-family: var(--font-body);
+  padding: 10px 13px;
+  border: 2px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--raised);
+  color: var(--text);
+  transition: border-color var(--ease), box-shadow var(--ease);
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-faint);
+}
+input:hover,
+textarea:hover {
+  border-color: var(--border);
+}
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--lavender);
+  box-shadow: 0 0 0 3px rgba(196, 179, 234, 0.3);
+}
+textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.55;
+}
+
+label {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* ============================================================
+   按钮
+   实色（每个 stage 用自己的强调色）用于主操作；
+   ghost（透明底 + 强调色边框/文字）用于卡片内的次要操作
+   ============================================================ */
+button {
+  font: inherit;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 14px;
+  padding: 10px 20px;
+  border: 2px solid transparent;
+  border-radius: 9px;
+  background: var(--lavender);
+  color: var(--lavender-ink);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--ease), border-color var(--ease), box-shadow var(--ease),
+    transform var(--ease-fast), color var(--ease);
+}
+button:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(46, 38, 33, 0.12);
+}
+button:not(:disabled):active {
+  transform: translateY(0);
+}
+button:disabled {
+  opacity: 0.45;
+  filter: grayscale(0.35);
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.stage[data-accent='mint'] button.btn-primary {
+  background: var(--mint);
+  color: var(--mint-ink);
+}
+.stage[data-accent='mint'] button.btn-primary:not(:disabled):hover {
+  background: #7ed4ac;
+}
+.stage[data-accent='lavender'] button.btn-primary {
+  background: var(--lavender);
+  color: var(--lavender-ink);
+}
+.stage[data-accent='lavender'] button.btn-primary:not(:disabled):hover {
+  background: #b39fe3;
+}
+.stage[data-accent='straw'] button.btn-primary {
+  background: var(--straw);
+  color: var(--straw-ink);
+}
+.stage[data-accent='straw'] button.btn-primary:not(:disabled):hover {
+  background: #f49298;
+}
+
+/* ghost 次要按钮——透明底 + 边框/文字用当前 stage 强调色 */
+button.btn-ghost {
+  background: transparent;
+  font-size: 12.5px;
+  padding: 6px 13px;
+}
+.stage[data-accent='mint'] button.btn-ghost {
+  color: var(--mint-ink);
+  border-color: var(--mint);
+}
+.stage[data-accent='mint'] button.btn-ghost:not(:disabled):hover {
+  background: var(--mint-tint);
+}
+.stage[data-accent='lavender'] button.btn-ghost {
+  color: var(--lavender-ink);
+  border-color: var(--lavender);
+}
+.stage[data-accent='lavender'] button.btn-ghost:not(:disabled):hover {
+  background: var(--lavender-tint);
+}
+.stage[data-accent='straw'] button.btn-ghost {
+  color: var(--straw-ink);
+  border-color: var(--straw);
+}
+.stage[data-accent='straw'] button.btn-ghost:not(:disabled):hover {
+  background: var(--straw-tint);
+}
+
+/* ============================================================
+   ErrorBanner —— 负面信号统一用 straw 组合
+   ============================================================ */
+.error-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  margin: 12px 0;
+  font-size: 14px;
+  line-height: 1.55;
+  background: var(--straw-tint);
+  color: var(--straw-ink);
+  border: 2px solid var(--straw);
+}
+.error-banner__text {
+  flex: 1;
+  white-space: pre-wrap;
+}
+.error-banner__dismiss {
+  background: none;
+  border: none;
+  color: inherit;
+  padding: 0 4px;
+  font-size: 16px;
+  line-height: 1;
+  box-shadow: none;
+}
+.error-banner__dismiss:not(:disabled):hover {
+  background: rgba(138, 46, 56, 0.1);
+  transform: none;
+  box-shadow: none;
+}
+
+/* ============================================================
+   结果展示
+   ============================================================ */
+.result-box {
+  margin-top: 16px;
+  padding: 16px 18px;
+  background: var(--raised);
+  border-radius: 10px;
+  font-size: 14px;
+}
+.result-box p {
+  margin: 6px 0;
+  color: var(--text);
+}
+.result-box__label {
+  font-family: var(--font-display);
+  font-weight: 600;
+  margin-top: 12px;
+  color: var(--text);
+}
+.preview-text {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--panel);
+  border: 2px solid var(--border-soft);
+  padding: 10px 12px;
+  border-radius: 9px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+/* ============================================================
+   职位卡片
+   ============================================================ */
+.job-list {
+  margin-top: 12px;
+}
+.job-card {
+  padding: 16px 18px;
+  background: var(--panel);
+  border: 2px solid var(--border-soft);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  margin-bottom: 12px;
+  transition: box-shadow var(--ease), border-color var(--ease);
+}
+.job-card:hover {
+  border-color: var(--lavender);
+  box-shadow: 0 4px 16px rgba(120, 100, 80, 0.1);
+}
+.job-card__title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--lavender-ink);
+  text-decoration: none;
+  transition: color var(--ease);
+}
+.job-card__title:hover {
+  color: #6b52ad;
+  text-decoration: underline;
+}
+.job-card__meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.job-card__date {
+  color: var(--text-faint);
+}
+
+.job-card__actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+.job-card__content {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--raised);
+  border: 2px solid var(--border-soft);
+  border-radius: 9px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* ============================================================
+   徽章（matched_via / fit_label / 审核状态 / 来源）
+   统一"浅底深字"胶囊风格，语义映射到三种强调色：
+     正面/强信号        -> mint
+     负面/弱信号/报错     -> straw
+     中性/信息类         -> lavender
+   ============================================================ */
+.badge {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background-color var(--ease), color var(--ease);
+}
+.badge--source {
+  background: var(--lavender-tint);
+  color: var(--lavender-ink);
+}
+.badge--strong {
+  background: var(--mint-tint);
+  color: var(--mint-ink);
+}
+.badge--weak {
+  background: var(--straw-tint);
+  color: var(--straw-ink);
+  cursor: help;
+}
+.badge--weakest {
+  background: var(--straw-tint);
+  color: var(--straw-ink);
+  cursor: help;
+}
+.badge--neutral {
+  background: var(--lavender-tint);
+  color: var(--lavender-ink);
+}
+
+/* fit_label：强匹配用 mint，一般匹配用 lavender（中性/信息），弱匹配用 straw */
+.badge--fit-strong {
+  background: var(--mint-tint);
+  color: var(--mint-ink);
+}
+.badge--fit-medium {
+  background: var(--lavender-tint);
+  color: var(--lavender-ink);
+}
+.badge--fit-weak {
+  background: var(--straw-tint);
+  color: var(--straw-ink);
+}
+
+.profile-scored-hint {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  background: var(--lavender-tint);
+  border: 2px solid var(--lavender);
+  border-radius: 9px;
+  font-size: 13px;
+  color: var(--lavender-ink);
+}
+
+/* ============================================================
+   定制简历区
+   ============================================================ */
+.review-status {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+/* 审核通过/未通过复用 strong(mint)/weak(straw) 徽章色 */
+.matched-chunks {
+  margin: 6px 0 0;
+  padding-left: 22px;
+  font-size: 13px;
+  color: var(--text);
+}
+.matched-chunks li {
+  margin-bottom: 5px;
+}
+.tailored-content {
+  margin-top: 6px;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.export-row {
+  margin-top: 18px;
+}
+.export-links {
+  display: flex;
+  gap: 16px;
+  margin-top: 10px;
+}
+.export-links a {
+  font-family: var(--font-mono);
+  color: var(--straw-ink);
+  font-weight: 600;
+  text-decoration: none;
+  transition: color var(--ease);
+}
+.export-links a:hover {
+  color: #6e232b;
+  text-decoration: underline;
+}
