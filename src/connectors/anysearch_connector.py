@@ -263,6 +263,25 @@ def _extract_content(url: str, timeout: int = 20) -> str:
     return result
 
 
+# AnySearch 匿名调用有时不会返回搜索结果，而是返回"已经自动帮你生成了一个新
+# 账号"的引导文案（实测坐实：换了好几个不同的 query，返回的都是同一组
+# username/password/api_key，不是随机内容，说明是服务端针对这个匿名客户端
+# 已经生成过一次账号了，之后匿名调用不再处理真实搜索，改成一直发这段文案）。
+# 这段文案里没有 URL，_parse_results_text 识别不出任何"结果段落"，会静默
+# 解析成 0 条结果——调用方（run_search_agent 的逐 query try/except）看到的
+# 只是"这条 query 搜到 0 条"，跟"真的没搜到内容"完全区分不出来，实测就是
+# 靠这个误判走了两轮、10 条 query 全 0 结果都没报错，直到手动扒开
+# _call_tool 的原始返回才找到真正原因。
+# 这里识别出这种响应就直接抛异常，让上层记录成一次真实的失败（"AnySearch
+# 返回了匿名账号引导文案，不是搜索结果"），而不是被 0 结果悄悄盖过去。
+_ANONYMOUS_ONBOARDING_MARKERS = ("automatically generated", "api_key=")
+
+
+def _is_anonymous_onboarding_response(text: str) -> bool:
+    low = (text or "").lower()
+    return all(marker in low for marker in _ANONYMOUS_ONBOARDING_MARKERS)
+
+
 def search(
     query: str,
     platform_type: str = "business",
@@ -298,6 +317,14 @@ def search(
 
     arguments = {"query": query, "max_results": min(max_results, 10)}
     text = _call_tool("search", arguments)
+
+    if _is_anonymous_onboarding_response(text):
+        raise RuntimeError(
+            "AnySearch 返回的是匿名账号自动引导文案，不是搜索结果——"
+            "说明 ANYSEARCH_API_KEY 未生效（未配置 / 已失效 / 超出额度）。"
+            "请检查 .env 里的 ANYSEARCH_API_KEY。"
+        )
+
     parsed_items = _parse_results_text(text)
 
     if extract_content and parsed_items:
