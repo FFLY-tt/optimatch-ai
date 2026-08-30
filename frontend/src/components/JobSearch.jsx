@@ -51,6 +51,31 @@ function FitLabelBadge({ fitLabel }) {
   return <span className={`badge badge--fit-${variant}`}>{fitLabel}</span>
 }
 
+// 产品决定：fit_label 从"只标注不过滤"改成"弱匹配默认折叠，但留一个开关能
+// 展开看到全部"——打分模型判断错了，用户还能找回来，不是被后端直接丢弃。
+//
+// 分组规则：
+// - "弱匹配"：进折叠组
+// - "强匹配"/"一般匹配"：默认展示组
+// - fit_label 是 null 但 profile_scored 为 true（content 为空、没法打分）：
+//   这些没有被判定过"不相关"，只是没法打分，不能连带隐藏，归进默认展示组
+// - profile_scored 为 false：不分组，全部当默认展示（维持原样全部平铺）
+function splitByFitLabel(jobs, profileScored) {
+  if (!profileScored) {
+    return { visible: jobs, weak: [] }
+  }
+  const visible = []
+  const weak = []
+  for (const job of jobs) {
+    if (job.fit_label === '弱匹配') {
+      weak.push(job)
+    } else {
+      visible.push(job)
+    }
+  }
+  return { visible, weak }
+}
+
 export default function JobSearch({ onUseForTailor }) {
   const [targetRole, setTargetRole] = useState('')
   const [targetRegion, setTargetRegion] = useState('Canada Remote')
@@ -58,6 +83,7 @@ export default function JobSearch({ onUseForTailor }) {
   const [loading, setLoading] = useState(false)
   const [jobs, setJobs] = useState(null)
   const [profileScored, setProfileScored] = useState(true)
+  const [showWeak, setShowWeak] = useState(false)
   const [error, setError] = useState(null)
   // 哪些卡片的"职位描述"折叠区展开了——用 id 集合记，默认全部收起
   const [expandedIds, setExpandedIds] = useState(() => new Set())
@@ -85,6 +111,7 @@ export default function JobSearch({ onUseForTailor }) {
       })
       setJobs(data.jobs)
       setProfileScored(data.profile_scored)
+      setShowWeak(false) // 每次新搜索都回到默认折叠状态
     } catch (err) {
       setError(err)
     } finally {
@@ -119,63 +146,89 @@ export default function JobSearch({ onUseForTailor }) {
       </form>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
 
-      {jobs && (
-        <div className="job-list">
-          {!profileScored && (
-            <p className="profile-scored-hint">
-              还没有简历数据，先上传简历后可以看到每条职位与你的匹配度
-            </p>
-          )}
-          <p className="result-box__label">共 {jobs.length} 条结果</p>
-          {jobs.map((job) => {
-            const hasContent = !!(job.content && job.content.trim())
-            const isExpanded = expandedIds.has(job.id)
-            return (
-              <div key={job.id} className="job-card">
-                <a
-                  href={job.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="job-card__title"
-                >
-                  {job.title}
-                </a>
-                <div className="job-card__meta">
-                  <span className="badge badge--source">{job.source}</span>
-                  <span className="job-card__date">{job.posted_at || '未知时间'}</span>
-                  <FitLabelBadge fitLabel={job.fit_label} />
-                  <MatchedViaBadge matchedVia={job.matched_via || []} source={job.source} />
-                </div>
+      {jobs && (() => {
+        const { visible, weak } = splitByFitLabel(jobs, profileScored)
+        // 全是弱匹配（默认展示组是空的）：折叠反而是负体验，用户会以为搜索
+        // 失败了——这种情况直接展开显示，不受 showWeak 开关状态影响。
+        const forceShowWeak = profileScored && visible.length === 0 && weak.length > 0
+        const displayWeak = showWeak || forceShowWeak
 
-                <div className="job-card__actions">
-                  <button
-                    type="button"
-                    className="job-card__use-btn btn-ghost"
-                    disabled={!hasContent}
-                    title={hasContent ? undefined : '这条没有抓到职位描述正文，请点标题链接手动复制'}
-                    onClick={() => onUseForTailor(job.content)}
-                  >
-                    用这条生成简历
-                  </button>
-                  <button
-                    type="button"
-                    className="job-card__toggle-btn btn-ghost"
-                    onClick={() => toggleExpanded(job.id)}
-                  >
-                    {isExpanded ? '收起职位描述' : '展开查看职位描述'}
-                  </button>
-                </div>
-
-                {isExpanded && (
-                  <pre className="job-card__content">
-                    {hasContent ? job.content : '（这条没有抓到职位描述正文）'}
-                  </pre>
-                )}
+        const renderCard = (job) => {
+          const hasContent = !!(job.content && job.content.trim())
+          const isExpanded = expandedIds.has(job.id)
+          return (
+            <div key={job.id} className="job-card">
+              <a href={job.url} target="_blank" rel="noreferrer" className="job-card__title">
+                {job.title}
+              </a>
+              <div className="job-card__meta">
+                <span className="badge badge--source">{job.source}</span>
+                <span className="job-card__date">{job.posted_at || '未知时间'}</span>
+                <FitLabelBadge fitLabel={job.fit_label} />
+                <MatchedViaBadge matchedVia={job.matched_via || []} source={job.source} />
               </div>
-            )
-          })}
-        </div>
-      )}
+
+              <div className="job-card__actions">
+                <button
+                  type="button"
+                  className="job-card__use-btn btn-ghost"
+                  disabled={!hasContent}
+                  title={hasContent ? undefined : '这条没有抓到职位描述正文，请点标题链接手动复制'}
+                  onClick={() => onUseForTailor(job.content)}
+                >
+                  用这条生成简历
+                </button>
+                <button
+                  type="button"
+                  className="job-card__toggle-btn btn-ghost"
+                  onClick={() => toggleExpanded(job.id)}
+                >
+                  {isExpanded ? '收起职位描述' : '展开查看职位描述'}
+                </button>
+              </div>
+
+              {isExpanded && (
+                <pre className="job-card__content">
+                  {hasContent ? job.content : '（这条没有抓到职位描述正文）'}
+                </pre>
+              )}
+            </div>
+          )
+        }
+
+        return (
+          <div className="job-list">
+            {!profileScored && (
+              <p className="profile-scored-hint">
+                还没有简历数据，先上传简历后可以看到每条职位与你的匹配度
+              </p>
+            )}
+            {forceShowWeak && (
+              <p className="profile-scored-hint">
+                没有强/一般匹配的结果，以下是全部 {weak.length} 条弱匹配结果
+              </p>
+            )}
+            <p className="result-box__label">共 {jobs.length} 条结果</p>
+
+            {visible.map(renderCard)}
+
+            {profileScored && weak.length > 0 && (
+              <>
+                {visible.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn-ghost job-list__toggle-weak-btn"
+                    onClick={() => setShowWeak((v) => !v)}
+                  >
+                    {showWeak ? '只看匹配结果' : `显示全部结果（含弱匹配，共 ${weak.length} 条）`}
+                  </button>
+                )}
+                {displayWeak && weak.map(renderCard)}
+              </>
+            )}
+          </div>
+        )
+      })()}
     </>
   )
 }

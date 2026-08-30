@@ -369,6 +369,13 @@ button.btn-ghost {
 .job-list {
   margin-top: 12px;
 }
+.job-list__toggle-weak-btn {
+  display: block;
+  width: 100%;
+  text-align: center;
+  margin: 6px 0 16px;
+  padding: 10px 20px;
+}
 .job-card {
   padding: 16px 18px;
   background: var(--panel);
