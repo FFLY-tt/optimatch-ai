@@ -1,6 +1,7 @@
 """
 求职与简历模块 (Tab B) 接口路由。
 """
+import hashlib
 import os
 import uuid
 from fastapi import APIRouter, HTTPException, UploadFile, File
@@ -14,6 +15,7 @@ from src.core.profile_language_store import get_profile_language, set_profile_la
 from src.core.vector_store import (
     add_resume_chunks, add_resume_keywords, get_all_resume_chunks, load_resume_keywords,
 )
+from src.core.status_store import get_status
 from src.core.jd_parser import parse_job_description
 from src.core.match_scoring import score_resume_chunks_against_jd, compute_fit_score, fit_score_to_label
 from src.tab_b_jobsearch.resume_generator import generate_tailored_resume
@@ -223,6 +225,27 @@ class SearchJobsResponse(BaseModel):
     profile_scored: bool  # False 表示用户还没有简历画像数据，fit_score/fit_label 全是 None，
                            # 结果按原来的 round-robin 方式合并，没有按匹配度排序
 
+def _stable_id(prefix: str, url: str) -> str:
+    """
+    给 anysearch/remoteok/remotive 这三路生成跟进程无关的稳定 record_id。
+
+    之前用的是 f"{prefix}_{abs(hash(url))}"——Python 内置 hash() 对字符串
+    从 3.3 起默认开启了哈希随机化（每个进程启动时用随机的 PYTHONHASHSEED），
+    同一个 url 在不同进程里 hash() 出来的值不一样。这意味着只要后端重启一次，
+    同一条职位的 record_id 就变了，之前存的 status（比如"已投递"）就再也查
+    不到——而且不会报错，表现就是"这条职位又变回 new 了"，很容易被误判成
+    "status_store 读取逻辑没做对"，实际是 id 本身不稳定。
+
+    改用 md5 摘要（跟进程/PYTHONHASHSEED 无关，同一个字符串永远得到同一个
+    结果），取前 16 位十六进制就够用，不需要完整 32 位摘要来保证在这个
+    应用的候选量级下不会碰撞。
+    HN 那一路（用 HN 帖子自己的 id，不是 Python hash()）本来就是稳定的，
+    不用改。
+    """
+    digest = hashlib.md5(url.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}_{digest}"
+
+
 def _round_robin_merge(source_lists: list[list[JobRecord]], limit: int) -> list[JobRecord]:
     """
     按"轮流从每路各取一条"的方式合并多路来源，而不是拼接后截断。
@@ -270,7 +293,7 @@ def search_jobs(request: SearchJobsRequest):
             record_id = f"hn_{r.url.split('id=')[-1]}"
             hn_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title, content=r.content,
-                url=r.url, posted_at=r.posted_at, status="new",
+                url=r.url, posted_at=r.posted_at, status=get_status(record_id),
             ))
     except Exception as e:
         print(f"  [调试] HN 抓取失败: {e}")
@@ -284,10 +307,10 @@ def search_jobs(request: SearchJobsRequest):
             max_rounds=2,
         )
         for r in agent_records:
-            record_id = f"tavily_{abs(hash(r.url))}"
+            record_id = _stable_id("tavily", r.url)
             anysearch_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title, content=r.content,
-                url=r.url, posted_at=r.posted_at, status="new",
+                url=r.url, posted_at=r.posted_at, status=get_status(record_id),
             ))
     except Exception as e:
         print(f"  [调试] 搜索 Agent 失败: {e}")
@@ -297,10 +320,10 @@ def search_jobs(request: SearchJobsRequest):
     try:
         remoteok_records = remoteok_search(keyword=request.target_role, max_results=request.max_results)
         for r in remoteok_records:
-            record_id = f"remoteok_{abs(hash(r.url))}"
+            record_id = _stable_id("remoteok", r.url)
             remoteok_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title, content=r.content,
-                url=r.url, posted_at=r.posted_at, status="new",
+                url=r.url, posted_at=r.posted_at, status=get_status(record_id),
                 matched_via=r.matched_via or [],
             ))
     except Exception as e:
@@ -309,10 +332,10 @@ def search_jobs(request: SearchJobsRequest):
     try:
         remotive_records = remotive_search(keyword=request.target_role, max_results=request.max_results)
         for r in remotive_records:
-            record_id = f"remotive_{abs(hash(r.url))}"
+            record_id = _stable_id("remotive", r.url)
             remotive_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title, content=r.content,
-                url=r.url, posted_at=r.posted_at, status="new",
+                url=r.url, posted_at=r.posted_at, status=get_status(record_id),
                 matched_via=r.matched_via or [],
             ))
     except Exception as e:
