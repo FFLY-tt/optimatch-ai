@@ -1,6 +1,20 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { searchJobs } from '../api'
 import ErrorBanner from './ErrorBanner'
+
+// /api/search-jobs 是一次性阻塞请求，不是流式的——前端并不知道后端现在具体
+// 跑到哪一路、哪一轮，所以这里只按"已经等了多久"分阶段给一个大概率的原因，
+// 不编造"现在正在查 XX 来源"这种看起来精确实则是猜的进度。阶段划分依据是
+// 实测：AnySearch 那一路要做多轮 LLM 查询规划，整个请求经常要 70-80 秒。
+function getWaitingMessage(seconds) {
+  if (seconds < 8) {
+    return '正在同时查询 HN / RemoteOK / Remotive / AnySearch 四路来源'
+  }
+  if (seconds < 40) {
+    return 'AnySearch 这一路会做多轮智能查询规划，通常是耗时最长的部分，请耐心等待'
+  }
+  return '等待时间较长，如果长时间无响应，可以检查后端终端是否有报错'
+}
 
 // matched_via 强弱信号展示规则：
 // - 含 "title"：强信号，实色标签
@@ -88,6 +102,24 @@ export default function JobSearch({ onUseForTailor }) {
   // 哪些卡片的"职位描述"折叠区展开了——用 id 集合记，默认全部收起
   const [expandedIds, setExpandedIds] = useState(() => new Set())
 
+  // 搜索期间的等待计时——每秒 +1，请求结束（成功或报错）就清零/停掉。
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const timerRef = useRef(null)
+
+  useEffect(() => {
+    if (loading) {
+      setElapsedSeconds(0)
+      timerRef.current = setInterval(() => {
+        setElapsedSeconds((s) => s + 1)
+      }, 1000)
+    } else {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+      setElapsedSeconds(0)
+    }
+    return () => clearInterval(timerRef.current)
+  }, [loading])
+
   function toggleExpanded(id) {
     setExpandedIds((prev) => {
       const next = new Set(prev)
@@ -145,6 +177,12 @@ export default function JobSearch({ onUseForTailor }) {
         </button>
       </form>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
+
+      {loading && (
+        <p className="search-waiting-hint">
+          已等待 {elapsedSeconds} 秒... {getWaitingMessage(elapsedSeconds)}
+        </p>
+      )}
 
       {jobs && (() => {
         const { visible, weak } = splitByFitLabel(jobs, profileScored)

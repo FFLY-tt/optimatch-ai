@@ -498,6 +498,19 @@ button.btn-ghost {
   color: var(--lavender-ink);
 }
 
+/* 搜索等待计时提示——不是报错/结果，用 raised 底色跟正文区分开就够了，
+   不用借错误/成功那几种语义色，避免误导成"出问题了"或"搜到了" */
+.search-waiting-hint {
+  margin: 12px 0;
+  padding: 10px 14px;
+  background: var(--raised);
+  border: 2px dashed var(--border-soft);
+  border-radius: 9px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
 /* ============================================================
    定制简历区
    ============================================================ */
