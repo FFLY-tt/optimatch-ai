@@ -15,6 +15,7 @@ from typing import Optional
 from playwright.sync_api import Page, Locator
 
 from src.tab_b_jobsearch.apply.adapters.base import ApplyAdapter, OpenResult
+from src.tab_b_jobsearch.apply.cookie_banner import dismiss_cookie_banners
 
 _APPLY_LINK_RE = re.compile(r"^\s*apply\b", re.I)
 _SUBMIT_RE = re.compile(r"submit\s*(your\s*)?application|submit\s*application|apply\s*now|submit\b", re.I)
@@ -44,6 +45,7 @@ class GenericATSAdapter(ApplyAdapter):
     def open_apply_flow(self, page: Page, job_url: str) -> OpenResult:
         page.goto(job_url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(1500)
+        dismiss_cookie_banners(page)  # 关掉 cookie 同意横幅，免得它挡住表单字段
 
         # 页面上如果有明显的 "Apply" 按钮/链接（而不是已经在表单页里了），点一下展开表单。
         try:

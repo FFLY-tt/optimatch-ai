@@ -36,7 +36,13 @@ class ApplicantProfile:
     work_authorization: str = "authorized"  # authorized / needs_sponsorship / other
     willing_to_relocate: bool = False
     willing_to_remote: bool = True
+    willing_to_travel: bool = False
     cover_letter_template: str = ""  # 可以用 {company} / {role} 占位符
+    # 申请表常见但之前没覆盖的字段
+    current_company: str = ""       # 当前/最近一份工作的公司名
+    notice_period: str = ""         # 离职通知期 / 最快到岗时间，比如 "2 weeks" / "Immediately"
+    highest_education: str = ""     # 最高学历，比如 "Master's Degree" / "Bachelor's Degree"
+    school: str = ""                # 毕业院校名
     # EEO/人口统计类问题在美国属于自愿披露，默认统一给"不透露"这种安全答案，
     # 用户如果想真实填写，自己改这几个字段。
     eeo_gender: str = "Decline to answer"

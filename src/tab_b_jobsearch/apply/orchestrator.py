@@ -27,6 +27,58 @@ def _candidate_adapters(job_url: str) -> list:
     return [a for a in all_adapters if a.matches(job_url)]
 
 
+# 需要人工交互的验证码标志（hCaptcha / reCAPTCHA v2 复选框或挑战弹窗 / Cloudflare Turnstile）。
+# 注意不匹配 reCAPTCHA v3/Enterprise 那个"纯打分、不需要点"的角标——它到处都是，
+# 匹配了会把一堆正常页面误判成有验证码。
+_CAPTCHA_IFRAME_SELECTORS = [
+    'iframe[src*="hcaptcha.com"]',
+    'iframe[src*="hcaptcha.net"]',
+    'iframe[src*="/recaptcha/api2/bframe"]',
+    'iframe[src*="/recaptcha/enterprise/bframe"]',
+    'iframe[title="recaptcha challenge expires in two minutes"]',
+    'iframe[src*="challenges.cloudflare.com"]',
+]
+_CAPTCHA_VISIBLE_SELECTORS = [
+    'div.g-recaptcha[data-sitekey]',
+    'div.h-captcha',
+    '#rc-imageselect',
+    '#cf-challenge-running',
+]
+
+
+def _scope_has_captcha(scope) -> bool:
+    for sel in _CAPTCHA_IFRAME_SELECTORS:
+        try:
+            if scope.locator(sel).count() > 0:
+                return True
+        except Exception:
+            pass
+    for sel in _CAPTCHA_VISIBLE_SELECTORS:
+        try:
+            el = scope.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def detect_captcha(page) -> bool:
+    """
+    页面（含所有 iframe）里是否出现了需要人工完成的验证码。
+    这条线不碰——检测到就老实停手，绝不尝试识别/绕过。
+    """
+    scopes = [page]
+    try:
+        scopes += list(page.frames)
+    except Exception:
+        pass
+    for sc in scopes:
+        if _scope_has_captcha(sc):
+            return True
+    return False
+
+
 @dataclass
 class ApplyDraft:
     session_id: str
@@ -85,7 +137,9 @@ def start_application(
         page.close()
         raise ApplyError("没能打开这个职位的申请表单。\n" + "\n".join(messages))
 
+    captcha_present = detect_captcha(page)
     filled_fields = chosen.fill(open_scope, profile, job_description)
+    captcha_present = captcha_present or detect_captcha(page)
     submit_button = chosen.locate_submit_button(page, open_scope)
 
     os.makedirs(SCREENSHOT_DIR, exist_ok=True)
@@ -105,6 +159,11 @@ def start_application(
     warnings = [f"「{f.label}」没能自动填上，需要你手动检查/填写" for f in filled_fields if f.source == "manual_required"]
     if submit_button is None:
         warnings.append("没能定位到最终的提交按钮——可能卡在中间某一步，投递前建议先手动看一眼截图/浏览器窗口。")
+    if captcha_present:
+        warnings.append(
+            "这个页面出现验证码（hCaptcha / reCAPTCHA 等），自动流程不会尝试识别或绕过验证码——"
+            "需要你自己在弹出的浏览器窗口里手动完成验证码，再手动走完剩下的提交步骤。"
+        )
 
     return ApplyDraft(
         session_id=session_id_placeholder,
@@ -113,7 +172,7 @@ def start_application(
         platform=chosen.platform_name,
         filled_fields=filled_fields,
         screenshot_path=screenshot_path,
-        ready_to_submit=submit_button is not None,
+        ready_to_submit=submit_button is not None and not captcha_present,
         warnings=warnings,
     )
 

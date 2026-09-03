@@ -11,6 +11,7 @@ from typing import Optional
 from playwright.sync_api import Page, Locator
 
 from src.tab_b_jobsearch.apply.adapters.base import ApplyAdapter, OpenResult
+from src.tab_b_jobsearch.apply.cookie_banner import dismiss_cookie_banners
 from src.tab_b_jobsearch.apply.field_filler import fill_all, FilledField
 
 _APPLY_NOW_RE = re.compile(r"apply\s*now", re.I)
@@ -32,6 +33,7 @@ class IndeedAdapter(ApplyAdapter):
     def open_apply_flow(self, page: Page, job_url: str) -> OpenResult:
         page.goto(job_url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(1500)
+        dismiss_cookie_banners(page)  # 关掉 cookie 同意横幅，免得它挡住表单字段
 
         apply_btn = page.get_by_role("button", name=_APPLY_NOW_RE).first
         if apply_btn.count() == 0:
