@@ -1,0 +1,25 @@
+{
+  "first_name": "Fangyu",
+  "last_name": "Lin",
+  "email": "you@example.com",
+  "phone": "+1 555 0100",
+  "location": "Toronto, ON, Canada",
+  "linkedin_url": "https://www.linkedin.com/in/your-handle",
+  "portfolio_url": "",
+  "github_url": "https://github.com/your-handle",
+  "resume_path": "C:\\FFLY-tt\\data\\exports\\Fangyu_Lin_Resume_Tailored.pdf",
+  "years_experience": 2,
+  "desired_salary": "",
+  "work_authorization": "authorized",
+  "willing_to_relocate": false,
+  "willing_to_remote": true,
+  "cover_letter_template": "",
+  "eeo_gender": "Decline to answer",
+  "eeo_race": "Decline to answer",
+  "eeo_veteran": "I am not a protected veteran",
+  "eeo_disability": "I do not want to answer",
+  "extra_answers": {
+    "why do you want to work": "写一段你自己会重复用到的通用回答，命中包含这个关键词的问题时会直接用",
+    "notice period": "2 weeks"
+  }
+}

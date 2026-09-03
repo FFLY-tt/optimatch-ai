@@ -27,7 +27,7 @@ def _save(data: dict) -> None:
 
 
 def update_status(record_id: str, status: str) -> None:
-    valid_statuses = {"new", "viewed", "contacted", "ignored"}
+    valid_statuses = {"new", "viewed", "contacted", "ignored", "applied"}
     if status not in valid_statuses:
         raise ValueError(f"status 必须是 {valid_statuses} 之一，收到: {status}")
 

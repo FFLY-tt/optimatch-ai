@@ -229,3 +229,8 @@ data/profile_language.json
 API.txt 
 
 data/chroma_db/
+
+# Auto-apply module: PII / local browser session state, never commit
+data/applicant_profile.json
+data/apply_browser_profile/
+data/apply_sessions/

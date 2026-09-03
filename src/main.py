@@ -9,15 +9,17 @@ from pydantic import BaseModel
 # 引入状态管理
 from src.core.status_store import update_status as _update_status
 
-# 引入两个业务模块的 Router
+# 引入业务模块的 Router
 from src.tab_a_outreach.router import router as tab_a_router
 from src.tab_b_jobsearch.router import router as tab_b_router
+from src.tab_b_jobsearch.apply_router import router as apply_router
 
 app = FastAPI(title="OptiMatch AI - API")
 
 # 挂载业务路由
 app.include_router(tab_a_router)
 app.include_router(tab_b_router)
+app.include_router(apply_router)
 
 
 # ---------- 通用状态管理 ----------
