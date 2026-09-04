@@ -109,7 +109,12 @@ SECTION_TO_REGION: dict[str, str] = {
     "experience": "B", "work experience": "B", "professional experience": "B",
     "employment history": "B", "工作经历": "B", "工作经验": "B",
     "projects": "B", "academic & research projects": "B", "project experience": "B",
-    "项目经验": "B", "项目经历": "B",
+    # 裸的 "project"（不带 s/experience）覆盖 "personal project"/"key project" 这类
+    # 单数写法——实测坐实过一次真实 bug：某份简历板块标题就写的 "PERSONAL PROJECT"
+    # （单数），之前的关键词表只有复数/带 experience 的变体，匹配不上，整段内容被
+    # classify_section 兜底成 Region A，一条 chunk 都切不出来。
+    "project": "B",
+    "项目经验": "B", "项目经历": "B", "项目": "B",
     "internship": "B", "internships": "B", "实习经历": "B", "实习经验": "B",
 }
 

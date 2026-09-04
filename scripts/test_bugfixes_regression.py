@@ -94,9 +94,160 @@ def test_degree_extraction_does_not_false_positive_on_substring():
     print("[PASS] test_degree_extraction_does_not_false_positive_on_substring")
 
 
+# 实测坐实过一次真实 bug：某份简历上传后返回"新增关键词：24"但"新增 chunk：0"——
+# 关键词提取正常，chunk 却完全切不出来，导致 tailor-resume 误判成"用户没上传过简历"。
+#
+# 根因是 pymupdf4llm 这类 PDF->Markdown 转换器按字号给标题分层级：候选人姓名用 #，
+# 板块标题（PROFESSIONAL EXPERIENCE/PERSONAL PROJECT）用 ##，具体每条经历/项目的
+# 标题（"公司 | 职位 | 时间"）又用了更深的 ###/####，层级不统一、也不跟 PDF 里的
+# 真实层级嵌套对应。_is_section_header() 之前对"真正的 Markdown 标题"来者不拒，
+# 于是每条经历标题都会把所在板块从中截断、另起一个新顶层板块；标题文字本身
+# （"公司 | 职位"）又匹配不上 SECTION_TO_REGION 任何关键词，被 classify_section()
+# 兜底成 Region A——Region A 只抠关键词、不做句子级切分，板块里本该被切成 chunk
+# 的经历要点内容就这样全部漏空。附带发现的次要缺口：SECTION_TO_REGION 里项目类
+# 板块关键词只有复数/带 experience 的变体（"projects"/"project experience"/
+# "项目经验"），这份简历板块标题写的是单数 "PERSONAL PROJECT"，也匹配不上。
+#
+# 下面这份 markdown 是真实触发过这个 bug 的简历，按同样的结构（姓名用 #、板块用
+# ##、每条经历/项目标题分别用 ###/####、日期单独另起一行、PERSONAL PROJECT 用
+# 单数）复现，姓名/邮箱/电话/GitHub 这些个人身份信息已经替换成占位值——
+# 触发这个 bug 靠的是标题层级结构，不需要真人的联系方式。
+_SAMPLE_MULTI_LEVEL_HEADING_RESUME_MD = """# **Alex (Test) Doe**
+
+Toronto, ON | +1 (555) 000-0000 | alex.doe.test@example.com | https://github.com/alexdoe-test
+
+## **PROFESSIONAL SUMMARY**
+
+- 3+ years of enterprise engineering experience specializing in AI applications, distributed systems, and backend development.
+
+- Proven expertise in building AI-driven solutions, including RAG systems, AI agents, and real-time data processing architectures.
+
+## **TECHNICAL SKILLS**
+
+- **AI & LLM:** LLM, RAG, LangGraph, Embedding Models, Vector Database
+
+- **Databases:** PostgreSQL, MySQL, Redis, ClickHouse.
+
+## **PROFESSIONAL EXPERIENCE**
+
+#### **Acme Corp | Industrial Intelligent Diagnosis Platform (RAG + LLM) | AI Engineer |**
+
+Feb 2025 - July 2025
+
+- Led the migration of a legacy Word2Vec-based diagnosis system to a RAG-powered intelligent diagnosis platform for manufacturing test environments.
+
+#### **Acme Corp | Industrial Test Data Processing Platform | Data Engineer |**
+
+June 2023 - Feb 2025
+
+- Led the refactoring of distributed Flink data pipelines processing tens of billions of hardware test records.
+
+### **Acme Corp | Enterprise Partner Management Platform | Backend Engineer |**
+
+April 2022 - June 2023
+
+- Redesigned a legacy backend platform into a scalable microservices architecture.
+
+## **PERSONAL PROJECT**
+
+**Multi-Agent Smart Contract Security System |** 2025 - 2026
+
+- Built a LangGraph-based multi-agent security framework for automated vulnerability detection and remediation.
+
+#### **AI Agent-driven Real-time Market Intelligence Platform |** 2026
+
+- Built a real-time AI market intelligence platform combining Kafka, Flink and ClickHouse streaming architecture with LLM agents.
+
+## **EDUCATION**
+
+**Test University |** Testville, TC
+
+Master of Engineering in Test Science | Sep 2019 - Mar 2022
+"""
+
+
+def test_resume_with_mixed_heading_level_entries_still_produces_chunks():
+    """
+    回归钉住上面注释描述的那个 bug：经历/项目条目标题被渲染成比板块标题更深
+    （但层级不统一）的 Markdown 标题时，之前会导致整份简历一条 chunk 都切不出来。
+    """
+    from src.core.resume_ast import parse_resume_markdown
+
+    result = parse_resume_markdown(_SAMPLE_MULTI_LEVEL_HEADING_RESUME_MD)
+
+    # 3 条 PROFESSIONAL EXPERIENCE + 2 条 PERSONAL PROJECT，每条一句话，共 5 句；
+    # 用 >= 5（而不是精确等于）留一点余地给 split_sentences 未来可能的分句调整，
+    # 但重点是"不能是 0"——这才是这个 bug 的核心断言。
+    assert len(result["chunks"]) >= 5, (
+        f"预期至少切出 5 条 chunk（3 条工作经历 + 2 条项目要点），实际只有 "
+        f"{len(result['chunks'])} 条——经历/项目条目被渲染成更深层级 Markdown 标题时"
+        f"chunk 又被吞空的老问题可能回来了"
+    )
+
+    # 关键词提取（Region A）本来就是好的，顺带确认没有被这次改动误伤
+    assert "langgraph" in result["keywords"]
+    assert any(kw.startswith("degree:") for kw in result["keywords"])
+
+    # 板块归类这一步是根因所在，顺带钉住：两个经历/项目板块本身得先被正确识别
+    # 成板块标题（而不是被它们内部的条目标题过滤掉），关键词表兜底的单数
+    # "PERSONAL PROJECT" 修复也在这里一并验证。
+    project_chunks = [c for c in result["chunks"] if c["tags"].get("project") == "PERSONAL PROJECT"]
+    assert len(project_chunks) == 2, f"PERSONAL PROJECT 板块应该切出 2 条 chunk，实际 {len(project_chunks)} 条"
+
+    print("[PASS] test_resume_with_mixed_heading_level_entries_still_produces_chunks")
+
+
+# 上面那次修复顺手发现但没修的次要问题：标题行和时间范围"分开另起一行写"
+# （不是同一行）时，_split_experience_entries 会把"标题行"和"日期+要点"错误
+# 切成两条独立经历——标题行自己变成一条空条目，真正带要点的那条反而丢了
+# company/role 标签，只剩 time。Zhibin_resume.pdf 里三段 Huawei 经历就是这种
+# 格式（"公司 | 职位" 一行，时间范围单独下一行，再往下才是要点列表）。
+#
+# 姓名/邮箱/电话同样换成占位值，不把真人 PII 存进代码库——触发这个 bug 靠的是
+# "标题行和日期分行写"这个格式本身，不需要真实联系方式。
+_SAMPLE_TITLE_AND_DATE_ON_SEPARATE_LINES_MD = """# **Alex (Test) Doe**
+
+Toronto, ON | +1 (555) 000-0000 | alex.doe.test@example.com
+
+## **PROFESSIONAL EXPERIENCE**
+
+#### **Acme Corp | Backend Platform | Senior Engineer |**
+
+Jan 2022 - Mar 2024
+
+- Redesigned the checkout pipeline to cut latency by half.
+- Mentored two junior engineers on distributed systems fundamentals.
+"""
+
+
+def test_entry_title_and_date_on_separate_lines_keep_all_tags():
+    """
+    回归钉住上面注释描述的那个次要 bug：标题行（公司|职位）和时间范围分开
+    另起一行写时，切出来的 chunk 应该同时带上 company/role/time 三个标签，
+    不能因为拆成了两条独立"经历"而丢掉标题那一半的信息。
+    """
+    from src.core.resume_ast import parse_resume_markdown
+
+    result = parse_resume_markdown(_SAMPLE_TITLE_AND_DATE_ON_SEPARATE_LINES_MD)
+
+    assert len(result["chunks"]) == 2, (
+        f"预期切出 2 条 chunk（对应 2 条要点），实际 {len(result['chunks'])} 条——"
+        f"标题行是不是又被单独拆成了一条空条目？"
+    )
+    for chunk in result["chunks"]:
+        tags = chunk["tags"]
+        assert tags.get("company") == "Acme Corp", f"company 标签丢了或者不对：{tags}"
+        assert tags.get("role") == "Backend Platform", f"role 标签丢了或者不对：{tags}"
+        assert tags.get("time") == "Jan 2022 - Mar 2024", f"time 标签丢了或者不对：{tags}"
+
+    print("[PASS] test_entry_title_and_date_on_separate_lines_keep_all_tags")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
     test_generate_tailored_resume_accepts_extra_context()
     test_degree_extraction_does_not_false_positive_on_substring()
+    test_resume_with_mixed_heading_level_entries_still_produces_chunks()
+    test_entry_title_and_date_on_separate_lines_keep_all_tags()
     print("\n全部回归测试通过。")

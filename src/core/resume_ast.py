@@ -68,6 +68,21 @@ _TIME_RANGE = re.compile(
 )
 
 
+_BOLD_WRAP = re.compile(r"^\*\*(.+)\*\*$")
+
+
+def _looks_like_entry_title(text: str) -> bool:
+    """
+    这行文字"看起来像一条经历/项目条目的标题"（公司 | 职位 | 时间 这种），
+    而不是板块标题（"PROFESSIONAL EXPERIENCE"/"技能" 这类几个词的分类名）。
+    判断依据：条目标题通常明显更长（塞了公司名+职位+"|"分隔的多段信息），
+    或者干脆自己就带着时间范围。
+    """
+    wrap_match = _BOLD_WRAP.match(text)
+    core = wrap_match.group(1) if wrap_match else text
+    return len(core) > 30 or bool(_TIME_RANGE.search(core))
+
+
 def _is_section_header(line: str) -> tuple[bool, str]:
     """
     判断一行是不是板块标题，返回 (是否是标题, 标题文本)。
@@ -81,15 +96,31 @@ def _is_section_header(line: str) -> tuple[bool, str]:
 
     md_match = _MD_HEADING.match(stripped)
     if md_match:
-        return True, md_match.group(2).strip()
+        candidate = md_match.group(2).strip()
+        # 实测坐实过一次真实 bug："新增关键词正常、chunk 却是 0"——根因是
+        # pymupdf4llm 这类 PDF->Markdown 转换器习惯按字号把"一条经历/项目的
+        # 标题"（公司 | 职位 | 时间）也渲染成 Markdown 标题（# ~ ######，
+        # 不分层级，字号够大就给标题），不只是给真正的板块标题（## 工作经历）
+        # 用。之前这里对"真正的 Markdown 标题"来者不拒，导致每条经历标题都
+        # 把所在板块从中截断、另起一个新顶层板块，标题文字本身（"公司|职位"）
+        # 又匹配不上 SECTION_TO_REGION 任何关键词，被 classify_section 兜底
+        # 分类成 Region A——Region A 只抠关键词、不做句子级切分，板块里的
+        # 内容（本该被切成 chunk 的经历要点）就这样全部漏空。
+        # 修法：跟"整行加粗"伪标题分支一样，先判断这是不是"看起来像条目标题"，
+        # 是的话就不当板块标题处理，原样留在当前板块内容里——
+        # _split_experience_entries 本来就会把 Markdown 标题行当条目边界，
+        # 留在原地反而能被正确切分。
+        if _looks_like_entry_title(candidate):
+            return False, ""
+        return True, candidate
 
     bold_match = _BOLD_ONLY_LINE.match(stripped)
     if bold_match:
         candidate = bold_match.group(1).strip()
         # 加粗整行常见的还有"公司名 | 时间"这种（Region B 内部条目），
-        # 不是真正的板块标题——用长度 + 是否命中板块关键词兜底过滤，
+        # 不是真正的板块标题——用长度 + 是否命中时间范围兜底过滤，
         # 避免把每个加粗的公司名行都误判成顶层板块。
-        if len(candidate) <= 30 and not _TIME_RANGE.search(candidate):
+        if not _looks_like_entry_title(candidate):
             return True, candidate
         return False, ""
 
@@ -145,17 +176,50 @@ def _parse_region_a(sections: list[dict]) -> set[str]:
     return keywords
 
 
+def _only_title_line_so_far(entry_lines: list[str]) -> bool:
+    """
+    entry_lines（当前正在累积的条目）目前是不是"只有一行经历标题（加粗整行
+    或 Markdown 标题），没有别的实义内容"（空行不算）——用来判断紧接着的
+    一行孤零零的时间范围，是不是这个标题的时间信息延续到了下一行写，
+    而不是一段新经历的开始。
+    """
+    nonblank = [l.strip() for l in entry_lines if l.strip()]
+    if len(nonblank) != 1:
+        return False
+    only_line = nonblank[0]
+    return bool(_BOLD_ONLY_LINE.match(only_line)) or bool(_MD_HEADING.match(only_line))
+
+
 def _split_experience_entries(lines: list[str]) -> list[list[str]]:
     """
     把 Region B 一个板块内部按"条目边界"切开，每个条目对应一段工作/项目经历。
-    边界判定：加粗整行、或包含时间范围的行——命中任一个就开启新条目。
-    如果整个板块一个边界都没找到（比如就一段流水账文字），就整段当一个条目。
+    边界判定：加粗整行、或包含时间范围的行、或 Markdown 标题——命中任一个就
+    开启新条目。如果整个板块一个边界都没找到（比如就一段流水账文字），就整段
+    当一个条目。
+
+    实测坐实过一次真实 bug：有的简历把"公司 | 职位"标题和"时间范围"分开另起
+    两行写（不是同一行），比如：
+        #### **Huawei Technologies | ... | AI Engineer |**
+        Feb 2025 – July 2025
+        - 具体要点...
+    标题行先命中 Markdown 标题边界开一条新条目，紧接着"时间范围"单独一行又
+    命中时间范围边界，被误判成"又一段新经历"，把标题行拆成一条空条目（只有
+    标题、没有正文），真正带要点的内容那条反而丢了公司名/职位标签——下面
+    "紧跟在标题行后面的孤零零时间范围行，不当新条目边界"这条规则就是修这个的。
     """
     entries: list[list[str]] = []
     current: list[str] = []
 
     for line in lines:
         stripped = line.strip()
+
+        is_pure_time_line = bool(stripped) and bool(_TIME_RANGE.fullmatch(stripped))
+        if is_pure_time_line and _only_title_line_so_far(current):
+            # 紧跟在经历标题行后面、整行就是一个时间范围（不是夹在一句话里的
+            # 日期提及）——接着上一条经历写，合并进同一条，不当新条目边界。
+            current.append(line)
+            continue
+
         is_boundary = bool(_BOLD_ONLY_LINE.match(stripped)) or bool(_TIME_RANGE.search(stripped)) or bool(
             _MD_HEADING.match(stripped)
         )
@@ -210,6 +274,21 @@ def _split_entry_header_body(entry_lines: list[str]) -> tuple[str, str]:
         body_first_line = first_line[time_match.end():]
         body_text = "\n".join([body_first_line] + rest_lines)
         return header_text, body_text
+
+    # 标题行本身没有时间范围——可能是"标题行和时间范围分开另起一行写"这种格式
+    # （_split_experience_entries 已经把这一行时间范围合并进了同一条目，不再是
+    # 单独一条空条目）。往下找 rest_lines 里第一条非空行，如果它整行就是一个
+    # 孤零零的时间范围，拼进 header_text 里一起交给 _extract_entry_header 抠
+    # time 标签，不要把这行日期本身也当成正文内容漏进 body/chunk 里。
+    j = 0
+    while j < len(rest_lines) and not rest_lines[j].strip():
+        j += 1
+    if j < len(rest_lines):
+        candidate = rest_lines[j].strip()
+        if _TIME_RANGE.fullmatch(candidate):
+            header_text = first_line + " " + candidate
+            body_text = "\n".join(rest_lines[j + 1:])
+            return header_text, body_text
 
     return first_line, "\n".join(rest_lines)
 
