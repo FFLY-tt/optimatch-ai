@@ -223,6 +223,7 @@ data/chroma_db/
 data/uploaded_resume.pdf
 data/exports/
 data/status_store.json
+data/resume_by_job.json
 data/resumes/
 data/resume_keywords.json
 data/profile_language.json

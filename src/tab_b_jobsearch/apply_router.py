@@ -13,8 +13,22 @@ from pydantic import BaseModel, Field
 
 from src.tab_b_jobsearch.apply.orchestrator import start_application, confirm_submit, cancel, ApplyError
 from src.core.status_store import update_status
+from src.core.resume_by_job_store import get_resume_for_job
 
 router = APIRouter(tags=["Tab B - Auto Apply"])
+
+
+class ResumeForJobResponse(BaseModel):
+    resume_path: str | None
+
+
+@router.get("/api/apply/resume-for-job/{job_id}", response_model=ResumeForJobResponse)
+def apply_resume_for_job(job_id: str):
+    """
+    这条职位有没有针对性定制并导出过简历——前端在"自动投递"按钮点击前先查一下，
+    没有就提示用户先去 Tab B 定制，不用等 /api/apply/start 打开浏览器才发现没简历。
+    """
+    return ResumeForJobResponse(resume_path=get_resume_for_job(job_id))
 
 
 class StartApplyRequest(BaseModel):

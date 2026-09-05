@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
-import { searchJobs } from '../api'
+import { searchJobs, getResumeForJob, startApply } from '../api'
 import ErrorBanner from './ErrorBanner'
+import ApplyReviewModal from './ApplyReviewModal'
 
 // /api/search-jobs 是一次性阻塞请求，不是流式的——前端并不知道后端现在具体
 // 跑到哪一路、哪一轮，所以这里只按"已经等了多久"分阶段给一个大概率的原因，
@@ -102,6 +103,20 @@ export default function JobSearch({ onUseForTailor }) {
   // 哪些卡片的"职位描述"折叠区展开了——用 id 集合记，默认全部收起
   const [expandedIds, setExpandedIds] = useState(() => new Set())
 
+  // 自动投递相关状态：
+  // - applyLoadingIds：正在"检查简历/打开浏览器填表"的职位 id 集合（可能不止一个卡片同时点）
+  // - applyNotices：按职位 id 存的"非报错类"提示（比如"还没有定制简历"），跟 ErrorBanner 的
+  //   真报错分开，不占用同一个通道
+  // - applyError：发起投递本身失败时的报错（网络/后端 400），走 ErrorBanner
+  // - activeApply：当前打开的"投递前确认"弹窗要用的数据 { job, draft }，null 表示没开着
+  // - appliedIds：这次会话里刚确认投递成功的职位 id——跟 job.status（后端持久化的状态）
+  //   分开存，确认成功后立刻在卡片上反映"已投递"，不用重新搜索一次才能看到
+  const [applyLoadingIds, setApplyLoadingIds] = useState(() => new Set())
+  const [applyNotices, setApplyNotices] = useState({})
+  const [applyError, setApplyError] = useState(null)
+  const [activeApply, setActiveApply] = useState(null)
+  const [appliedIds, setAppliedIds] = useState(() => new Set())
+
   // 搜索期间的等待计时——每秒 +1，请求结束（成功或报错）就清零/停掉。
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const timerRef = useRef(null)
@@ -127,6 +142,51 @@ export default function JobSearch({ onUseForTailor }) {
       else next.add(id)
       return next
     })
+  }
+
+  async function handleAutoApply(job) {
+    setApplyNotices((prev) => {
+      if (!(job.id in prev)) return prev
+      const next = { ...prev }
+      delete next[job.id]
+      return next
+    })
+    setApplyError(null)
+    setApplyLoadingIds((prev) => new Set(prev).add(job.id))
+    try {
+      const resumeInfo = await getResumeForJob(job.id)
+      if (!resumeInfo.resume_path) {
+        setApplyNotices((prev) => ({
+          ...prev,
+          [job.id]: '还没有为这个职位生成定制简历，请先在下面「定制简历生成与导出」里针对这条职位生成并导出一份简历（导出时会自动关联到这条职位）。',
+        }))
+        return
+      }
+      // 这一步会真的打开浏览器窗口并尝试填表，可能要几秒到十几秒。
+      const draft = await startApply({
+        jobId: job.id,
+        jobUrl: job.url,
+        jobDescription: job.content,
+      })
+      setActiveApply({ job, draft })
+    } catch (err) {
+      setApplyError(err)
+    } finally {
+      setApplyLoadingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(job.id)
+        return next
+      })
+    }
+  }
+
+  function handleApplyConfirmed(jobId) {
+    setAppliedIds((prev) => new Set(prev).add(jobId))
+    setActiveApply(null)
+  }
+
+  function handleApplyCancelled() {
+    setActiveApply(null)
   }
 
   async function handleSearch(e) {
@@ -177,6 +237,7 @@ export default function JobSearch({ onUseForTailor }) {
         </button>
       </form>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
+      <ErrorBanner error={applyError} onDismiss={() => setApplyError(null)} />
 
       {loading && (
         <p className="search-waiting-hint">
@@ -194,11 +255,24 @@ export default function JobSearch({ onUseForTailor }) {
         const renderCard = (job) => {
           const hasContent = !!(job.content && job.content.trim())
           const isExpanded = expandedIds.has(job.id)
+          const isApplying = applyLoadingIds.has(job.id)
+          const isApplied = job.status === 'applied' || appliedIds.has(job.id)
+          const notice = applyNotices[job.id]
           return (
             <div key={job.id} className="job-card">
-              <a href={job.url} target="_blank" rel="noreferrer" className="job-card__title">
-                {job.title}
-              </a>
+              <div className="job-card__title-row">
+                <a href={job.url} target="_blank" rel="noreferrer" className="job-card__title">
+                  {job.title}
+                </a>
+                <button
+                  type="button"
+                  className="job-card__apply-btn btn-primary"
+                  disabled={isApplying || isApplied}
+                  onClick={() => handleAutoApply(job)}
+                >
+                  {isApplied ? '✅ 已投递' : isApplying ? '投递中...' : '🤖 自动投递'}
+                </button>
+              </div>
               <div className="job-card__meta">
                 <span className="badge badge--source">{job.source}</span>
                 <span className="job-card__date">{job.posted_at || '未知时间'}</span>
@@ -206,13 +280,15 @@ export default function JobSearch({ onUseForTailor }) {
                 <MatchedViaBadge matchedVia={job.matched_via || []} source={job.source} />
               </div>
 
+              {notice && <p className="job-card__apply-notice">{notice}</p>}
+
               <div className="job-card__actions">
                 <button
                   type="button"
                   className="job-card__use-btn btn-ghost"
                   disabled={!hasContent}
                   title={hasContent ? undefined : '这条没有抓到职位描述正文，请点标题链接手动复制'}
-                  onClick={() => onUseForTailor(job.content)}
+                  onClick={() => onUseForTailor(job)}
                 >
                   用这条生成简历
                 </button>
@@ -267,6 +343,15 @@ export default function JobSearch({ onUseForTailor }) {
           </div>
         )
       })()}
+
+      {activeApply && (
+        <ApplyReviewModal
+          job={activeApply.job}
+          draft={activeApply.draft}
+          onConfirmed={() => handleApplyConfirmed(activeApply.job.id)}
+          onCancelled={handleApplyCancelled}
+        />
+      )}
     </>
   )
 }

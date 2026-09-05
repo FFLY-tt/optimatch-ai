@@ -84,10 +84,49 @@ export function tailorResume({ jobDescription, userNotes, topK }) {
 }
 
 // format: 'docx' | 'md' | 'pdf'
-export function exportResume(format, { finalContent, candidateName }) {
+// jobId 可选：传了就让后端记一笔"这份简历是为这条职位定制的"，自动投递时能自动找到它。
+export function exportResume(format, { finalContent, candidateName, jobId }) {
   return request(`/api/export-resume-${format}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ final_content: finalContent, candidate_name: candidateName }),
+    body: JSON.stringify({
+      final_content: finalContent,
+      candidate_name: candidateName,
+      job_id: jobId || null,
+    }),
+  })
+}
+
+// ---------- 自动投递 ----------
+
+export function getResumeForJob(jobId) {
+  return request(`/api/apply/resume-for-job/${encodeURIComponent(jobId)}`)
+}
+
+export function startApply({ jobId, jobUrl, jobDescription }) {
+  return request('/api/apply/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      job_id: jobId,
+      job_url: jobUrl,
+      job_description: jobDescription || '',
+    }),
+  })
+}
+
+export function confirmApply(sessionId) {
+  return request('/api/apply/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  })
+}
+
+export function cancelApply(sessionId) {
+  return request('/api/apply/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
   })
 }

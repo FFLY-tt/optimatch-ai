@@ -8,11 +8,15 @@ export default function App() {
   // job_description 提到这一层，让 JobSearch 的"用这条生成简历"按钮
   // 能直接把内容填进 TailorResume——两个组件本来是兄弟关系，不用引入
   // 状态管理库，提到共同父组件、用 props 往下传就够了。
+  // jobId 跟着一起提上来：TailorResume 导出简历时要把它带给后端，
+  // 才能让"这份简历是为哪条职位定制的"这层关联生效，自动投递才能自动找到它。
   const [jobDescription, setJobDescription] = useState('')
+  const [jobId, setJobId] = useState(null)
   const tailorSectionRef = useRef(null)
 
-  function handleUseJobForTailor(content) {
-    setJobDescription(content)
+  function handleUseJobForTailor(job) {
+    setJobDescription(job.content)
+    setJobId(job.id)
     tailorSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
@@ -50,7 +54,11 @@ export default function App() {
             <p className="stage__subtitle">STAGE_03 · TAILOR_AND_EXPORT</p>
           </div>
           <div className="stage__card">
-            <TailorResume jobDescription={jobDescription} onJobDescriptionChange={setJobDescription} />
+            <TailorResume
+              jobDescription={jobDescription}
+              onJobDescriptionChange={setJobDescription}
+              jobId={jobId}
+            />
           </div>
         </section>
       </div>

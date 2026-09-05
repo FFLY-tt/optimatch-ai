@@ -16,6 +16,7 @@ from src.core.vector_store import (
     add_resume_chunks, add_resume_keywords, get_all_resume_chunks, load_resume_keywords,
 )
 from src.core.status_store import get_status
+from src.core.resume_by_job_store import set_resume_for_job
 from src.core.jd_parser import parse_job_description
 from src.core.match_scoring import score_resume_chunks_against_jd, compute_fit_score, fit_score_to_label
 from src.tab_b_jobsearch.resume_generator import generate_tailored_resume
@@ -415,6 +416,10 @@ def search_jobs(request: SearchJobsRequest):
 class ExportResumeRequest(BaseModel):
     final_content: str = Field(..., description="User-reviewed final resume text")
     candidate_name: str = Field(..., description="Used for document title and filename")
+    # 可选：这份简历是针对哪条职位定制的（/api/search-jobs 返回的 JobRecord.id）。
+    # 传了就记一笔 job_id -> 导出文件路径，自动投递（/api/apply/start）时能按
+    # job_id 直接找到这份简历，不用用户手动选文件。不传就只是单纯导出，不联动。
+    job_id: str | None = Field(default=None, description="Job record id this resume was tailored for")
 
 class ExportResumeResponse(BaseModel):
     success: bool
@@ -425,6 +430,8 @@ def export_resume_docx(request: ExportResumeRequest):
     if not request.final_content.strip():
         raise HTTPException(status_code=400, detail="final_content 不能为空")
     filepath = export_resume_to_docx(request.final_content, request.candidate_name)
+    if request.job_id:
+        set_resume_for_job(request.job_id, filepath)
     return ExportResumeResponse(success=True, download_url=f"/files/{os.path.basename(filepath)}")
 
 @router.post("/api/export-resume-md", response_model=ExportResumeResponse)
@@ -432,6 +439,8 @@ def export_resume_md(request: ExportResumeRequest):
     if not request.final_content.strip():
         raise HTTPException(status_code=400, detail="final_content 不能为空")
     filepath = export_resume_to_md(request.final_content, request.candidate_name)
+    if request.job_id:
+        set_resume_for_job(request.job_id, filepath)
     return ExportResumeResponse(success=True, download_url=f"/files/{os.path.basename(filepath)}")
 
 @router.post("/api/export-resume-pdf", response_model=ExportResumeResponse)
@@ -439,6 +448,8 @@ def export_resume_pdf(request: ExportResumeRequest):
     if not request.final_content.strip():
         raise HTTPException(status_code=400, detail="final_content 不能为空")
     filepath = export_resume_to_pdf(request.final_content, request.candidate_name)
+    if request.job_id:
+        set_resume_for_job(request.job_id, filepath)
     return ExportResumeResponse(success=True, download_url=f"/files/{os.path.basename(filepath)}")
 
 

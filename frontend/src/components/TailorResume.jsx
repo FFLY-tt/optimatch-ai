@@ -4,7 +4,7 @@ import ErrorBanner from './ErrorBanner'
 
 const EXPORT_FORMATS = ['docx', 'md', 'pdf']
 
-export default function TailorResume({ jobDescription, onJobDescriptionChange }) {
+export default function TailorResume({ jobDescription, onJobDescriptionChange, jobId }) {
   const [userNotes, setUserNotes] = useState('')
   const [topK, setTopK] = useState(5)
   const [loading, setLoading] = useState(false)
@@ -47,6 +47,7 @@ export default function TailorResume({ jobDescription, onJobDescriptionChange })
       const data = await exportResume(format, {
         finalContent: editedContent,
         candidateName,
+        jobId,
       })
       setExportLinks((prev) => ({ ...prev, [format]: data.download_url }))
     } catch (err) {
@@ -115,6 +116,16 @@ export default function TailorResume({ jobDescription, onJobDescriptionChange })
             onChange={(e) => setEditedContent(e.target.value)}
           />
 
+          {jobId ? (
+            <p className="job-link-hint job-link-hint--linked">
+              📌 导出会关联到职位 <code>{jobId}</code>——自动投递会自动用这份简历，不用手动选文件
+            </p>
+          ) : (
+            <p className="job-link-hint job-link-hint--unlinked">
+              这份简历没有关联到具体职位（不是从职位卡片的"用这条生成简历"跳转过来的）——
+              导出后自动投递不会自动用到它，需要手动指定简历路径
+            </p>
+          )}
           <div className="export-row control-row">
             <input
               placeholder="候选人姓名 *"

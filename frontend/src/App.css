@@ -23,6 +23,24 @@
   --straw-ink: #8a2e38;
   --straw-tint: #fdeff0;
 
+  /* blue：给"AI 生成"这类来源标签用，跟 lavender（中性/信息）区分开，
+     跟 mint（"来自画像"，绿）配对成一对可辨识的"两种填写来源"配色 */
+  --blue: #8ec4ee;
+  --blue-ink: #1c5384;
+  --blue-tint: #eaf4fc;
+
+  /* orange：专门给"需要用户手动补"这类"不是错，但要你管"的标签用，
+     跟 straw（负面/报错，偏粉红）区分开，别混成一种语义 */
+  --orange: #f3bb6b;
+  --orange-ink: #7a4a08;
+  --orange-tint: #fdf1de;
+
+  /* alert：验证码这类"自动流程真的卡住了、必须人工处理"的强提醒，
+     比 straw 更浓烈，跟"填了但建议再看看"级别的普通警告拉开视觉差 */
+  --alert: #e15667;
+  --alert-ink: #ffffff;
+  --alert-tint: #fbdde1;
+
   --radius-card: 11px;
   --radius-frame: 28px;
   --shadow-card: 0 2px 10px rgba(120, 100, 80, 0.07);
@@ -389,6 +407,12 @@ button.btn-ghost {
   border-color: var(--lavender);
   box-shadow: 0 4px 16px rgba(120, 100, 80, 0.1);
 }
+.job-card__title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
 .job-card__title {
   font-family: var(--font-display);
   font-weight: 700;
@@ -399,6 +423,21 @@ button.btn-ghost {
 .job-card__title:hover {
   color: #6b52ad;
   text-decoration: underline;
+}
+.job-card__apply-btn {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.job-card__apply-notice {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  background: var(--orange-tint);
+  border: 2px solid var(--orange);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--orange-ink);
 }
 .job-card__meta {
   display: flex;
@@ -556,4 +595,226 @@ button.btn-ghost {
 .export-links a:hover {
   color: #6e232b;
   text-decoration: underline;
+}
+
+/* 简历是否关联到具体职位——放在导出按钮上方，导出前就让用户知道这次导出
+   会不会被自动投递自动捡到，不是导出完了才发现。 */
+.job-link-hint {
+  margin: 14px 0 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+}
+.job-link-hint--linked {
+  background: var(--mint-tint);
+  color: var(--mint-ink);
+  border: 2px solid var(--mint);
+}
+.job-link-hint--linked code {
+  background: rgba(30, 91, 65, 0.12);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.job-link-hint--unlinked {
+  background: var(--lavender-tint);
+  color: var(--lavender-ink);
+  border: 2px dashed var(--lavender);
+}
+
+/* ============================================================
+   自动投递 —— "填写来源"标签 + 投递前确认弹窗
+   ============================================================ */
+.badge--source-profile {
+  background: var(--mint-tint);
+  color: var(--mint-ink);
+}
+.badge--source-llm {
+  background: var(--blue-tint);
+  color: var(--blue-ink);
+}
+.badge--source-manual_required {
+  background: var(--orange-tint);
+  color: var(--orange-ink);
+}
+.badge--source-skipped_has_value {
+  background: var(--lavender-tint);
+  color: var(--lavender-ink);
+}
+
+.apply-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(46, 38, 33, 0.5);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 20px;
+  overflow-y: auto;
+  z-index: 100;
+}
+.apply-modal {
+  background: var(--panel);
+  border: 2px solid var(--border-soft);
+  border-radius: var(--radius-card);
+  box-shadow: 0 12px 40px rgba(46, 38, 33, 0.25);
+  width: 100%;
+  max-width: 720px;
+  padding: 22px 24px 20px;
+}
+.apply-modal__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.apply-modal__header > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+.apply-modal__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 18px;
+}
+.apply-modal__job-title {
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.apply-modal__close {
+  background: none;
+  border: none;
+  box-shadow: none;
+  font-size: 20px;
+  line-height: 1;
+  padding: 0 4px;
+  color: var(--text-muted);
+}
+.apply-modal__close:not(:disabled):hover {
+  color: var(--text);
+  transform: none;
+  box-shadow: none;
+}
+.apply-modal__screenshot {
+  margin-bottom: 14px;
+  border: 2px solid var(--border-soft);
+  border-radius: 9px;
+  overflow: hidden;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--raised);
+}
+.apply-modal__screenshot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.apply-modal__table-wrap {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 2px solid var(--border-soft);
+  border-radius: 9px;
+  margin-top: 6px;
+}
+.apply-modal__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.apply-modal__table th {
+  position: sticky;
+  top: 0;
+  background: var(--raised);
+  text-align: left;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  border-bottom: 2px solid var(--border-soft);
+}
+.apply-modal__table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: top;
+  word-break: break-word;
+}
+.apply-modal__table tr:last-child td {
+  border-bottom: none;
+}
+.apply-modal__empty-value {
+  color: var(--text-faint);
+}
+.apply-modal__captcha-alert {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: var(--alert-tint);
+  border: 2px solid var(--alert);
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #7a1620;
+}
+.apply-modal__captcha-alert p {
+  margin: 0;
+}
+.apply-modal__captcha-alert p + p {
+  margin-top: 6px;
+}
+.apply-modal__warnings {
+  margin: 12px 0 0;
+  padding-left: 20px;
+  font-size: 12.5px;
+  color: var(--orange-ink);
+}
+.apply-modal__warnings li {
+  margin-bottom: 4px;
+}
+.apply-modal__not-ready {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  background: var(--straw-tint);
+  border: 2px solid var(--straw);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--straw-ink);
+  font-weight: 600;
+}
+.apply-modal__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+/* ============================================================
+   上传简历 —— 拖拽释放区
+   ============================================================ */
+.dropzone {
+  padding: 16px;
+  border: 2px dashed var(--border-soft);
+  border-radius: var(--radius-card);
+  background: var(--raised);
+  transition: border-color var(--ease), background-color var(--ease);
+}
+.dropzone--active {
+  border-style: solid;
+  border-color: var(--mint);
+  background: var(--mint-tint);
+}
+.dropzone__hint {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.dropzone--active .dropzone__hint {
+  color: var(--mint-ink);
+}
+.dropzone__filename {
+  margin: 10px 0 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
 }

@@ -17,6 +17,7 @@ from src.tab_b_jobsearch.apply.field_filler import FilledField
 from src.tab_b_jobsearch.apply.adapters.linkedin import LinkedInAdapter
 from src.tab_b_jobsearch.apply.adapters.indeed import IndeedAdapter
 from src.tab_b_jobsearch.apply.adapters.generic_ats import GenericATSAdapter
+from src.core.resume_by_job_store import get_resume_for_job
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data")
 SCREENSHOT_DIR = os.path.join(DATA_DIR, "apply_sessions")
@@ -106,12 +107,19 @@ def start_application(
     except ProfileNotConfigured as e:
         raise ApplyError(str(e)) from e
 
-    if resume_path:
-        profile = dataclasses.replace(profile, resume_path=resume_path)
+    # resume_path 解析优先级：调用方明确传的 > 之前针对这个职位定制/导出过的简历
+    # （resume_by_job_store，Tab B 导出时如果带了 job_id 就会记一笔）> profile 里
+    # 配的默认简历。都没有才报错——这样自动投递默认就会用"为这条职位量身定制"
+    # 的那份，而不是每次都退回一份通用简历。
+    resolved_resume_path = resume_path or get_resume_for_job(job_id) or profile.resume_path
+    if resolved_resume_path != profile.resume_path:
+        profile = dataclasses.replace(profile, resume_path=resolved_resume_path)
     if not profile.resume_path or not os.path.exists(profile.resume_path):
         raise ApplyError(
-            "没有配好可用的简历文件路径（applicant_profile.json 的 resume_path，"
-            "或者本次调用单独传的 resume_path）。文件需要真实存在于本机磁盘上。"
+            "没有配好可用的简历文件路径（本次调用单独传的 resume_path、"
+            "针对这个职位定制导出过的简历、applicant_profile.json 里配的默认简历，"
+            "三处都没找到有效路径）。可以先在 Tab B 里针对这个职位生成并导出一份定制简历，"
+            "或者在 applicant_profile.json 里配一个默认简历路径。文件需要真实存在于本机磁盘上。"
         )
 
     context = browser.get_context()
