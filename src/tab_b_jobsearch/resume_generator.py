@@ -67,6 +67,22 @@ FAITHFUL: Yes/No
 ISSUE: <if No, name the bullet and the problem in one sentence; else "None">
 """
 
+# 关联度评估：定制流程本身不会因为"方向不搭"就拒绝生成（它只重排 + 措辞微调，不编造，
+# 所以产出的简历永远是真实完整的），但用户仍然需要知道"这份真实简历跟这个岗位到底搭不搭"。
+# 这一步不 gate 任何东西，只给一个诚实的判断，前端展示出来。
+_RELEVANCE_SYSTEM = """You judge how well a candidate's ACTUAL experience matches a job's core \
+requirements. Base it ONLY on the real companies, titles, and bullet points given — never on \
+wishful reading. Do not reward tenuous keyword overlap.
+
+- STRONG: the candidate has directly done the core work this role needs
+- MODERATE: adjacent / transferable experience, but clear gaps on the core requirements
+- WEAK: the resume is in a different direction; applying is likely a poor use of time
+
+Respond in this exact format:
+MATCH: STRONG/MODERATE/WEAK
+WHY: <one sentence, name the concrete gap or the concrete fit>
+"""
+
 
 def _numbered_entries(entries: list[ResumeEntry]) -> str:
     lines = []
@@ -174,6 +190,31 @@ def _tailor_entry_section(
     return ResumeSection(title=section.title, kind=section.kind, entries=new_entries), changes, reworded_any
 
 
+def _assess_relevance(doc: ResumeDocument, job_description: str) -> tuple[str, str]:
+    """返回 (MATCH 档位, 一句话理由)；LLM 失败时返回 ('', '') —— 不误报成匹配。"""
+    exp = []
+    for kind in SECTION_KIND_ENTRIES:
+        sec = doc.section(kind)
+        if not sec:
+            continue
+        for e in sec.entries:
+            exp.append(f"{e.title} ({e.date})")
+            exp.extend(f"  - {b}" for b in e.bullets)
+    prompt = (
+        f"Job description:\n{job_description[:2500]}\n\n"
+        f"Candidate's actual experience:\n" + "\n".join(exp)
+    )
+    try:
+        resp = chat(prompt, system=_RELEVANCE_SYSTEM, model=FILTER_MODEL, temperature=0)
+    except Exception:
+        return "", ""
+    low = resp.lower()
+    label = "STRONG" if "match: strong" in low else "WEAK" if "match: weak" in low else \
+            "MODERATE" if "match: moderate" in low else ""
+    why = resp.split("WHY:", 1)[1].strip() if "WHY:" in resp else resp.split("why:", 1)[-1].strip()
+    return label, why.splitlines()[0].strip() if why else ""
+
+
 def _rewordings_are_faithful(pairs: list[tuple[str, str]]) -> bool:
     body = "\n\n".join(
         f"Pair {i + 1}:\nORIGINAL: {o}\nTAILORED: {t}" for i, (o, t) in enumerate(pairs)
@@ -259,8 +300,14 @@ def generate_tailored_resume(
     """
     以 resume_document 为底稿生成定制简历。
     返回: {"tailored_resume": markdown, "passed_review": bool, "issue": str,
-           "attempts": int, "changes": [str, ...]}
+           "attempts": int, "changes": [str, ...],
+           "relevance_label": "STRONG"|"MODERATE"|"WEAK"|"", "relevance_note": str}
+
+    passed_review 只表示"结构完整、没丢没篡改"——这个流程不会因为方向不搭就拒绝生成
+    （它不编造，产出永远真实完整）。"这份简历跟这个岗位搭不搭"由 relevance_label 单独
+    给出，不 gate 生成，交给用户判断。
     """
+    relevance_label, relevance_note = _assess_relevance(resume_document, job_description)
     attempt = 0
     all_changes: list[str] = []
     tailored_md = render_markdown(resume_document)
@@ -318,6 +365,8 @@ def generate_tailored_resume(
         "issue": issue,
         "attempts": attempt,
         "changes": all_changes,
+        "relevance_label": relevance_label,
+        "relevance_note": relevance_note,
     }
 
 

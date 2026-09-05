@@ -528,7 +528,9 @@ Feb 2025 – July 2025
 
 June 2023 – Feb 2025
 
-- Led the refactoring of distributed Flink data pipelines processing tens of billions of records.
+- Led the refactoring of distributed Flink data pipelines processing tens of billions of records, significantly reducing serialization
+
+overhead.
 
 - Designed an end-to-end data reliability framework; ensured 99.99% data completeness while cutting recovery time from 30 minutes to under 5.
 
@@ -589,6 +591,9 @@ def test_resume_document_parser_captures_everything():
     # 第二段有 2 条 bullet（数据完整性/恢复时间那条不能被丢）
     data_eng = next(e for e in exp.entries if e.title.endswith("Data Engineer"))
     assert len(data_eng.bullets) == 2 and any("99.99%" in b for b in data_eng.bullets)
+    # PDF 换行把一句话腰斩（"...serialization \n\n overhead."）在新解析路径下也要被接回去
+    assert any("serialization overhead." in b for b in data_eng.bullets), \
+        f"句子被换行腰斩了：{data_eng.bullets}"
 
     proj = doc.section("projects")
     assert proj and len(proj.entries) == 2, "PERSONAL PROJECT 应独立成板块、含 2 条"
@@ -673,6 +678,7 @@ def test_tailored_resume_preserves_key_fields():
         "Master of Engineering in Test Science",               # education 原句
         "AI Engineer", "Data Engineer", "Backend Engineer",    # 三个职位头衔
         "99.99% data completeness",                            # 那条差点被丢的 bullet
+        "serialization overhead.",                             # 换行腰斩过的 bullet，措辞里要完整
         "Feb 2025 – July 2025", "June 2023 – Feb 2025", "April 2022 – June 2023",
     ):
         assert must in out, f"定制结果里丢了：{must!r}"
@@ -683,7 +689,54 @@ def test_tailored_resume_preserves_key_fields():
     assert out.count("\n- ") == _SAMPLE_FULL_RESUME_MD.count("\n- "), \
         f"bullet 总数变了：原 {_SAMPLE_FULL_RESUME_MD.count(chr(10)+'- ')}，现 {out.count(chr(10)+'- ')}"
 
+    # 方向对口的 JD：关联度应判 STRONG/MODERATE，不该是 WEAK
+    assert res["relevance_label"] in ("STRONG", "MODERATE"), res["relevance_label"]
+
     print("[PASS] test_tailored_resume_preserves_key_fields")
+
+
+def test_mismatched_job_flagged_weak_but_not_fabricated():
+    """
+    需要 LLM。之前测出"确实不匹配"的 K8s/云平台方向：新流程内容量变大（喂全量简历），
+    也不能因此意外放水——关联度必须判 WEAK，且不能把 JD 里的 Kubernetes/Terraform
+    等原简历没有的技术偷偷编进 bullet；同时内容一条不丢。
+    """
+    import os as _os
+    if not _os.getenv("DEEPSEEK_API_KEY"):
+        print("[SKIP] test_mismatched_job_flagged_weak_but_not_fabricated（没有 DEEPSEEK_API_KEY）")
+        return
+
+    from src.core.resume_document import parse_resume_document
+    from src.tab_b_jobsearch.resume_generator import generate_tailored_resume
+
+    doc = parse_resume_document(_SAMPLE_FULL_RESUME_MD)
+    jd = ("Cloud / Platform Engineer. Own Kubernetes clusters and multi-region infra. Terraform "
+          "IaC, CI/CD pipeline design, cloud cost optimization, observability with Prometheus and "
+          "Grafana, incident response, developer platform tooling on AWS and GCP. 5+ years running "
+          "production Kubernetes.")
+    try:
+        res = generate_tailored_resume(doc, jd)
+    except (ConnectionError, TimeoutError, OSError) as e:
+        print(f"[SKIP] test_mismatched_job_flagged_weak_but_not_fabricated（网络不通：{e}）")
+        return
+
+    out = res["tailored_resume"]
+    assert res["relevance_label"] == "WEAK", f"错配职位没被判 WEAK，而是 {res['relevance_label']!r}"
+    assert res["passed_review"], f"结构校验没过：{res['issue']}"
+
+    src_low = _SAMPLE_FULL_RESUME_MD.lower()
+    out_low = out.lower()
+    for kw in ("kubernetes", "terraform", "prometheus", "grafana", "aws", "gcp", "incident response"):
+        if kw in src_low:
+            continue
+        assert kw not in out_low, f"把原简历没有的 JD 技术 {kw!r} 编进了定制结果"
+
+    # 内容仍然一条不丢
+    assert out.count("\n- ") == _SAMPLE_FULL_RESUME_MD.count("\n- ")
+    for must in ("AI Engineer", "Data Engineer", "Backend Engineer", "99.99% data completeness"):
+        assert must in out
+
+    print("[PASS] test_mismatched_job_flagged_weak_but_not_fabricated")
 
 
 if __name__ == "__main__":
@@ -702,4 +755,5 @@ if __name__ == "__main__":
     test_resume_document_parser_captures_everything()
     test_structural_review_catches_content_loss()
     test_tailored_resume_preserves_key_fields()
+    test_mismatched_job_flagged_weak_but_not_fabricated()
     print("\n全部回归测试通过。")

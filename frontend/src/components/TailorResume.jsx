@@ -95,13 +95,28 @@ export default function TailorResume({ jobDescription, onJobDescriptionChange, j
         <div className="result-box">
           <div className="review-status">
             <span className={`badge ${result.passed_review ? 'badge--strong' : 'badge--weak'}`}>
-              {result.passed_review ? '✅ 结构校验通过' : '⚠️ 结构校验未通过'}
+              {result.passed_review ? '✅ 结构校验通过（原文关键内容一字未丢）' : '⚠️ 结构校验未通过'}
             </span>
             <span>尝试次数：{result.attempts}</span>
             {result.issue && result.issue.toLowerCase() !== 'none' && (
               <span>问题：{result.issue}</span>
             )}
           </div>
+
+          {result.relevance_label && (
+            <p
+              className={`job-link-hint ${
+                result.relevance_label === 'WEAK'
+                  ? 'job-link-hint--unlinked'
+                  : 'job-link-hint--linked'
+              }`}
+            >
+              {result.relevance_label === 'STRONG' && '🟢 强匹配'}
+              {result.relevance_label === 'MODERATE' && '🟡 一般匹配'}
+              {result.relevance_label === 'WEAK' && '🔴 弱匹配 —— 你的真实经历跟这个岗位方向不太搭，投递前自己再权衡一下'}
+              {result.relevance_note ? `：${result.relevance_note}` : ''}
+            </p>
+          )}
 
           {result.changes && result.changes.length > 0 && (
             <>

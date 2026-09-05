@@ -171,6 +171,8 @@ class TailorResumeResponse(BaseModel):
     attempts: int
     matched_chunks: list[str]
     changes: list[str] = []
+    relevance_label: str = ""   # STRONG / MODERATE / WEAK —— 真实简历跟这个岗位搭不搭
+    relevance_note: str = ""
 
 @router.post("/api/tailor-resume", response_model=TailorResumeResponse)
 def tailor_resume(request: TailorResumeRequest):
@@ -212,6 +214,8 @@ def tailor_resume(request: TailorResumeRequest):
         attempts=result["attempts"],
         matched_chunks=matched_chunks,
         changes=result.get("changes", []),
+        relevance_label=result.get("relevance_label", ""),
+        relevance_note=result.get("relevance_note", ""),
     )
 
 
