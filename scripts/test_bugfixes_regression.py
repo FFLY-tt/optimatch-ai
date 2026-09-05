@@ -457,6 +457,42 @@ def test_resume_chunk_dedup():
     print("[PASS] test_resume_chunk_dedup")
 
 
+# 实测坐实过一次真实 bug：pymupdf4llm 从 PDF 抽 markdown 时把一句话从中间折行
+# （"...significantly reducing serialization \n\noverhead. \n\n- Designed ..."），
+# split_sentences 直接按换行切，"overhead." 被当成一句独立的话，简历库里多出个
+# 单词 chunk，生成的定制简历里也出现 "...reducing serialization." 这种腰斩表述。
+# 修复：分句前先跑 _reflow_soft_wraps 把"不是句子结尾的换行"接回去。
+def test_split_sentences_reflows_pdf_soft_wraps():
+    from src.core.text_utils import split_sentences
+
+    # 报告里的真实例子：句子中间被 \n\n 断开 + 后面跟一个真正的新列表项
+    got = split_sentences(
+        "Also designed a Protobuf-based ingestion architecture, significantly reducing serialization \n\n"
+        "overhead. \n\n"
+        "- Designed an end-to-end data reliability framework."
+    )
+    assert got == [
+        "Also designed a Protobuf-based ingestion architecture, significantly reducing serialization overhead.",
+        "Designed an end-to-end data reliability framework.",
+    ], got
+    assert not any(len(s) < 15 for s in got), f"仍然切出了单词碎片：{got}"
+
+    # 单个 \n 的软换行也要接回去
+    assert split_sentences("reducing serialization\noverhead.") == ["reducing serialization overhead."]
+
+    # 真正的列表项 / 句末标点 边界不能被误合并
+    assert split_sentences("- Built a data pipeline\n- Improved latency by 40%") == [
+        "Built a data pipeline", "Improved latency by 40%",
+    ]
+    assert split_sentences("Led the migration.\nDesigned the pipeline.") == [
+        "Led the migration.", "Designed the pipeline.",
+    ]
+    # 连字符复合词在连字符处换行：拼回去不补空格、保留连字符，不要拼成垃圾 token
+    assert split_sentences("Migrated to a RAG-\npowered platform.") == ["Migrated to a RAG-powered platform."]
+
+    print("[PASS] test_split_sentences_reflows_pdf_soft_wraps")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -469,4 +505,5 @@ if __name__ == "__main__":
     test_workday_cxs_url_transform()
     test_workday_job_content_via_cxs_api()
     test_resume_chunk_dedup()
+    test_split_sentences_reflows_pdf_soft_wraps()
     print("\n全部回归测试通过。")

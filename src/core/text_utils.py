@@ -29,6 +29,44 @@ _BULLET_PREFIX = re.compile(r"^[-*•‣▪]\s*")
 # 但简历列表条目这种场景，践本命中率明显更高。
 _INLINE_BULLET_JOIN = re.compile(r"(?<!\d)\s-\s(?=[A-Z一-鿿])")
 
+# 行尾是明确的句子/子句边界（英文和中文的句末/子句标点）。
+_HARD_LINE_END = re.compile(r"[.!?:;。！？；：]$")
+# 行首是"新的一项"：Markdown 项目符号、有序列表编号、或 Markdown 标题。
+_NEW_ITEM_START = re.compile(r"^(?:[-*•‣▪]\s|\d+[.)]\s|#{1,6}\s)")
+# 行尾是连字符（字母 + '-'）：可能是 PDF 断词（"serial-"+"ization"），也可能是
+# 真实的连字符复合词在连字符处换行（"RAG-"+"powered"）。两种情况都"不补空格
+# 直接拼、保留连字符"最稳——得到 "serial-ization" / "RAG-powered"，都可读，
+# 也不会像去掉连字符那样把 "RAG-powered" 拼成垃圾 token "RAGpowered"。
+_HYPHEN_LINE_END = re.compile(r"[A-Za-z]-$")
+
+
+def _reflow_soft_wraps(text: str) -> str:
+    """
+    分句前先把"软换行"接回去。
+
+    实测坐实过一次真实 bug：pymupdf4llm 从 PDF 抽 markdown 时，会把一句话从
+    中间硬折成两行（甚至中间还插一个空行），比如
+        "...significantly reducing serialization \n\n overhead. \n\n - Designed ..."
+    直接按换行切分，"overhead." 就被当成一句独立的话，简历库里多出个单词
+    chunk，生成的定制简历里也出现 "...reducing serialization." 这种腰斩表述。
+
+    规则：逐行看，如果上一行行尾不是明确的句子/子句边界（. ! ? : ; 。！？；：），
+    且当前行不是新的列表项/标题，就把当前行接到上一行末尾（补一个空格；
+    上一行是连字符结尾的直接拼、不补空格）。空行不单独成边界——它在
+    PDF 抽取里经常是句中噪声，是否合并只看"上一行结不结尾 + 当前行是不是新项"。
+    """
+    merged: list[str] = []
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        prev = merged[-1] if merged else ""
+        if prev and not _HARD_LINE_END.search(prev) and not _NEW_ITEM_START.match(line):
+            merged[-1] = prev + line if _HYPHEN_LINE_END.search(prev) else prev + " " + line
+        else:
+            merged.append(line)
+    return "\n".join(merged)
+
 
 def split_sentences(text: str, min_length: int = 4) -> list[str]:
     """
@@ -45,9 +83,15 @@ def split_sentences(text: str, min_length: int = 4) -> list[str]:
 
     min_length: 过滤掉切出来太短的碎片（比如单独一个符号、单个词），
     这类碎片做句子级语义匹配没有意义。
+
+    最前面先跑一遍 _reflow_soft_wraps：PDF 抽取常把一句话从中间折行，
+    要先把这种软换行接回去，再按行/标点切，否则会切出 "overhead." 这种
+    单词碎片（下面 min_length 也拦不住带标点的单词）。
     """
     if not text or not text.strip():
         return []
+
+    text = _reflow_soft_wraps(text)
 
     sentences = []
     for line in text.split("\n"):
