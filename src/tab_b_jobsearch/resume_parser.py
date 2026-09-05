@@ -20,7 +20,12 @@ def parse_resume_to_markdown(file_path: str, file_ext: str) -> str:
             return f.read().strip()
 
     if file_ext == ".pdf":
-        md_text = pymupdf4llm.to_markdown(file_path)
+        # embed_images=True：把简历里的图片（照片这类）以 base64 data URI 直接嵌进
+        # Markdown，导出时能原样带上；image_size_limit 会自动忽略过小的图标/装饰。
+        try:
+            md_text = pymupdf4llm.to_markdown(file_path, embed_images=True)
+        except Exception:
+            md_text = pymupdf4llm.to_markdown(file_path)  # 老版本没有 embed_images 参数就退回
         return md_text.strip()
 
     raise ValueError(f"不支持的文件格式: {file_ext}（只支持 .pdf 和 .md）")

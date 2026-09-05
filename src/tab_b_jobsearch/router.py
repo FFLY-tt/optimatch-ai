@@ -17,6 +17,8 @@ from src.core.vector_store import (
 )
 from src.core.status_store import get_status
 from src.core.resume_by_job_store import set_resume_for_job
+from src.core.resume_document_store import save_resume_markdown, load_resume_markdown
+from src.core.resume_document import parse_resume_document
 from src.core.jd_parser import parse_job_description
 from src.core.match_scoring import score_resume_chunks_against_jd, compute_fit_score, fit_score_to_label
 from src.tab_b_jobsearch.resume_generator import generate_tailored_resume
@@ -112,6 +114,10 @@ async def upload_resume(file: UploadFile = File(...)):
     merged_keywords = add_resume_keywords(parsed["keywords"])
     total_chunks = len(get_all_resume_chunks())
 
+    # 存一份简历原文全文——/api/tailor-resume 以它为底稿做定制（chunk 只够检索打分，
+    # 还原不出姓名/联系方式/summary/技能/教育背景）。覆盖上一份：定制以"当前简历"为准。
+    save_resume_markdown(markdown_text, source_name=file.filename)
+
     return UploadResumeResponse(
         success=True,
         new_chunks=new_chunk_count,
@@ -164,39 +170,48 @@ class TailorResumeResponse(BaseModel):
     issue: str
     attempts: int
     matched_chunks: list[str]
+    changes: list[str] = []
 
 @router.post("/api/tailor-resume", response_model=TailorResumeResponse)
 def tailor_resume(request: TailorResumeRequest):
     if not request.job_description.strip():
         raise HTTPException(status_code=400, detail="job_description 不能为空")
 
-    resume_chunks = get_all_resume_chunks()
-    if not resume_chunks:
+    resume_md = load_resume_markdown()
+    if not resume_md:
         raise HTTPException(
             status_code=400,
-            detail="没有找到简历数据，请先通过 /api/upload-resume 上传至少一份简历。"
+            detail="没有找到简历原文，请先通过 /api/upload-resume 上传简历"
+                   "（新版定制流程以完整简历原文为底稿，请重新上传一次）。",
         )
-    resume_keywords = load_resume_keywords()
 
-    jd_parsed = parse_job_description(request.job_description)
-    matches = score_resume_chunks_against_jd(
-        resume_chunks, resume_keywords, jd_parsed, top_k=request.top_k
-    )
-    if not matches:
-        raise HTTPException(status_code=400, detail="没有找到可用于匹配的简历片段。")
+    resume_doc = parse_resume_document(resume_md)
+    if not resume_doc.name and not resume_doc.sections:
+        raise HTTPException(status_code=400, detail="简历原文没能解析出可用结构，请检查上传的简历文件。")
 
     result = generate_tailored_resume(
-        original_chunks=matches,
+        resume_document=resume_doc,
         job_description=request.job_description,
         extra_context=request.user_notes,
     )
+
+    # matched_chunks 只作展示用（"这份 JD 命中了简历里的哪些经历"），不再参与生成
+    matched_chunks: list[str] = []
+    resume_chunks = get_all_resume_chunks()
+    if resume_chunks:
+        jd_parsed = parse_job_description(request.job_description)
+        matched = score_resume_chunks_against_jd(
+            resume_chunks, load_resume_keywords(), jd_parsed, top_k=request.top_k
+        )
+        matched_chunks = [m["text"] for m in matched]
 
     return TailorResumeResponse(
         tailored_resume=result["tailored_resume"],
         passed_review=result["passed_review"],
         issue=result["issue"],
         attempts=result["attempts"],
-        matched_chunks=[m["text"] for m in matches],
+        matched_chunks=matched_chunks,
+        changes=result.get("changes", []),
     )
 
 

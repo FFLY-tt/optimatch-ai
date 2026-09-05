@@ -95,18 +95,35 @@ export default function TailorResume({ jobDescription, onJobDescriptionChange, j
         <div className="result-box">
           <div className="review-status">
             <span className={`badge ${result.passed_review ? 'badge--strong' : 'badge--weak'}`}>
-              {result.passed_review ? '✅ 审核通过' : '⚠️ 未通过审核'}
+              {result.passed_review ? '✅ 结构校验通过' : '⚠️ 结构校验未通过'}
             </span>
             <span>尝试次数：{result.attempts}</span>
-            {result.issue && result.issue !== 'none' && <span>问题：{result.issue}</span>}
+            {result.issue && result.issue.toLowerCase() !== 'none' && (
+              <span>问题：{result.issue}</span>
+            )}
           </div>
 
-          <p className="result-box__label">匹配到的简历片段：</p>
-          <ul className="matched-chunks">
-            {result.matched_chunks.map((c, i) => (
-              <li key={i}>{c}</li>
-            ))}
-          </ul>
+          {result.changes && result.changes.length > 0 && (
+            <>
+              <p className="result-box__label">本次针对该职位做的调整（原文其余部分原样保留）：</p>
+              <ul className="matched-chunks">
+                {result.changes.map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {result.matched_chunks && result.matched_chunks.length > 0 && (
+            <>
+              <p className="result-box__label">这条职位命中了简历里的这些经历（仅供参考）：</p>
+              <ul className="matched-chunks">
+                {result.matched_chunks.map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ul>
+            </>
+          )}
 
           <p className="result-box__label">定制简历内容（可编辑）：</p>
           <textarea

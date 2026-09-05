@@ -1,113 +1,234 @@
 """
-简历 Word 导出模块。
-把用户复审确认后的最终文字，排版成一份标准格式的 .docx 简历。
+简历导出模块（docx / md / pdf）。
 
-只做基础的专业排版（标题、加粗小标题、项目符号），不做花哨设计——
-简历这类文档，招聘方看重的是清晰易读，不是视觉设计。
+输入是定制流程产出的干净 Markdown（resume_document.render_markdown 的格式）：
+    # 姓名
+    联系方式一行
+    ## 板块标题
+    ### 条目标题
+    时间行
+    - bullet
+    **粗体** 行内标记 / ![alt](data:...) 图片
+
+排版目标：跟用户上传的原始简历风格一致——姓名居中加大加粗、联系方式一行、
+各板块标题加粗 + 分隔线、bullet 统一符号缩进——而不是一坨纯文本。
 """
 
+import base64
+import io
 import os
 import re
+
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_CENTER
+from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem, HRFlowable, Image,
+)
 
 EXPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "exports")
 
+_BOLD_INLINE = re.compile(r"\*\*(.+?)\*\*")
+_CJK_CHAR = re.compile(r"[一-鿿]")
+_IMAGE_LINE = re.compile(r"^!\[[^\]]*\]\(([^)]*)\)$")
+_DATA_URI = re.compile(r"^data:(image/[a-z.+-]+);base64,(.+)$", re.IGNORECASE)
 
-def export_resume_to_docx(content: str, candidate_name: str) -> str:
+
+# ---------------------------------------------------------------------------
+# 把 Markdown 拆成结构化"块"，docx / pdf 共用
+# ---------------------------------------------------------------------------
+def _parse_blocks(content: str) -> list[dict]:
     """
-    把生成的简历文字排版成 .docx 文件。
-    content: 定制简历的最终文字（可能包含 Markdown 风格的 ** 加粗 和 - 项目符号）
-    candidate_name: 候选人姓名，用于文档标题和文件命名
-    返回：生成的文件路径
+    返回块列表，每块 {"type": ..., ...}：
+      title(姓名) / contact / section(板块标题) / entry(条目标题) / meta(时间等)
+      / bullet / body / image
     """
-    os.makedirs(EXPORT_DIR, exist_ok=True)
-
-    doc = Document()
-
-    # 设置基础字体
-    style = doc.styles["Normal"]
-    style.font.name = "Calibri"
-    style.font.size = Pt(11)
-
-    # 标题：候选人姓名
-    title = doc.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run(candidate_name)
-    run.bold = True
-    run.font.size = Pt(20)
-
-    doc.add_paragraph()  # 空行
-
-    # 逐行处理内容，识别 Markdown 风格的加粗和项目符号
+    blocks: list[dict] = []
     lines = content.split("\n")
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
+    prev_type = None
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            prev_type = None
             continue
 
-        # 项目符号行（以 - 或 * 开头）
-        is_bullet = stripped.startswith("-") or stripped.startswith("*")
-        if is_bullet:
-            stripped = stripped.lstrip("-*").strip()
-            p = doc.add_paragraph(style="List Bullet")
+        img = _IMAGE_LINE.match(line)
+        if img:
+            blocks.append({"type": "image", "src": img.group(1)})
+            prev_type = "image"
+            continue
+
+        if line.startswith("# "):
+            blocks.append({"type": "title", "text": line[2:].strip()})
+            prev_type = "title"
+        elif line.startswith("## "):
+            blocks.append({"type": "section", "text": line[3:].strip().replace("*", "")})
+            prev_type = "section"
+        elif line.startswith("### "):
+            blocks.append({"type": "entry", "text": line[4:].strip().replace("*", "")})
+            prev_type = "entry"
+        elif line.startswith("- ") or (line.startswith("* ") and not line.startswith("**")):
+            blocks.append({"type": "bullet", "text": line[2:].strip()})
+            prev_type = "bullet"
+        elif prev_type == "title":
+            blocks.append({"type": "contact", "text": line})
+            prev_type = "contact"
+        elif prev_type == "entry":
+            blocks.append({"type": "meta", "text": line})
+            prev_type = "meta"
         else:
-            p = doc.add_paragraph()
-
-        # 处理 **加粗** 标记
-        parts = re.split(r"(\*\*.*?\*\*)", stripped)
-        for part in parts:
-            if part.startswith("**") and part.endswith("**"):
-                run = p.add_run(part.strip("*"))
-                run.bold = True
-            else:
-                p.add_run(part)
-
-    # 文件名安全化处理（去掉空格和特殊字符）
-    safe_name = re.sub(r"[^\w\-]", "_", candidate_name)
-    filename = f"{safe_name}_Resume_Tailored.docx"
-    filepath = os.path.join(EXPORT_DIR, filename)
-    doc.save(filepath)
-
-    return filepath
+            blocks.append({"type": "body", "text": line})
+            prev_type = "body"
+    return blocks
 
 
-def export_resume_to_md(content: str, candidate_name: str) -> str:
-    """
-    把定制简历内容直接存成 .md 文件——LLM 生成的内容本来就是 Markdown
-    格式（见 resume_generator.py 的 TAILOR_SYSTEM_PROMPT 第 9 条要求），
-    这里不需要做任何格式转换，原样落盘就行。
-    """
+def _decode_image(src: str) -> bytes | None:
+    m = _DATA_URI.match(src.strip())
+    if m:
+        try:
+            return base64.b64decode(m.group(2))
+        except Exception:
+            return None
+    if os.path.isfile(src):
+        try:
+            with open(src, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+    return None
+
+
+def _md_to_html(text: str) -> str:
+    return _BOLD_INLINE.sub(r"<b>\1</b>", text)
+
+
+# ---------------------------------------------------------------------------
+# DOCX
+# ---------------------------------------------------------------------------
+def _docx_bottom_border(paragraph) -> None:
+    p_pr = paragraph._p.get_or_add_pPr()
+    borders = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "666666")
+    borders.append(bottom)
+    p_pr.append(borders)
+
+
+def _docx_runs(paragraph, text: str) -> None:
+    for part in re.split(r"(\*\*.*?\*\*)", text):
+        if not part:
+            continue
+        run = paragraph.add_run(part[2:-2] if part.startswith("**") and part.endswith("**") else part)
+        if part.startswith("**") and part.endswith("**"):
+            run.bold = True
+
+
+def export_resume_to_docx(content: str, candidate_name: str) -> str:
     os.makedirs(EXPORT_DIR, exist_ok=True)
-    safe_name = re.sub(r"[^\w\-]", "_", candidate_name)
-    filename = f"{safe_name}_Resume_Tailored.md"
-    filepath = os.path.join(EXPORT_DIR, filename)
+    doc = Document()
 
-    title = f"# {candidate_name}\n\n"
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(title + content.strip() + "\n")
+    normal = doc.styles["Normal"]
+    normal.font.name = "Calibri"
+    normal.font.size = Pt(10.5)
+    for section in doc.sections:
+        section.top_margin = section.bottom_margin = Inches(0.6)
+        section.left_margin = section.right_margin = Inches(0.75)
 
+    blocks = _parse_blocks(content)
+    if not any(b["type"] == "title" for b in blocks) and candidate_name.strip():
+        blocks.insert(0, {"type": "title", "text": candidate_name.strip()})
+
+    for b in blocks:
+        t = b["type"]
+        if t == "title":
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r = p.add_run(b["text"])
+            r.bold = True
+            r.font.size = Pt(20)
+        elif t == "contact":
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r = p.add_run(b["text"])
+            r.font.size = Pt(9.5)
+            r.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
+            p.paragraph_format.space_after = Pt(6)
+        elif t == "section":
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(12)
+            p.paragraph_format.space_after = Pt(4)
+            r = p.add_run(b["text"].upper())
+            r.bold = True
+            r.font.size = Pt(12)
+            _docx_bottom_border(p)
+        elif t == "entry":
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(0)
+            _docx_runs(p, b["text"])
+            for run in p.runs:
+                run.bold = True
+                run.font.size = Pt(11)
+        elif t == "meta":
+            p = doc.add_paragraph()
+            r = p.add_run(b["text"])
+            r.italic = True
+            r.font.size = Pt(9.5)
+            r.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+        elif t == "bullet":
+            p = doc.add_paragraph(style="List Bullet")
+            p.paragraph_format.space_after = Pt(2)
+            _docx_runs(p, b["text"])
+        elif t == "image":
+            data = _decode_image(b["src"])
+            if data:
+                try:
+                    doc.add_picture(io.BytesIO(data), width=Inches(1.4))
+                    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                except Exception:
+                    pass
+        else:  # body
+            p = doc.add_paragraph()
+            _docx_runs(p, b["text"])
+
+    safe_name = re.sub(r"[^\w\-]", "_", candidate_name) or "resume"
+    filepath = os.path.join(EXPORT_DIR, f"{safe_name}_Resume_Tailored.docx")
+    doc.save(filepath)
     return filepath
 
 
-# 最初 PDF 导出用的是 markdown -> HTML -> xhtml2pdf 这条路，实测坐实过
-# 一个致命问题：xhtml2pdf 自己的 HTML 渲染层无法正确处理中文——即使按
-# 官方文档的方式用 reportlab.pdfbase.ttfonts.TTFont 显式注册好中文字体
-# （直接用 reportlab 画中文完全正常，证明字体本身没问题），xhtml2pdf
-# 输出的 PDF 里中文依然全部变成黑色方块。试过 @font-face、
-# registerFontFamily、!important、UTF-8 字节+meta charset 声明，都没用，
-# 判断是这个库这个版本本身的缺陷，不是配置问题。
-# 所以改成绕开 xhtml2pdf 的 HTML 层，直接用 reportlab 的 Platypus
-# （SimpleDocTemplate + Paragraph/ListFlowable）自己排版——reportlab
-# 本身对中文没有问题，只要字体注册对了。
+# ---------------------------------------------------------------------------
+# MD
+# ---------------------------------------------------------------------------
+def export_resume_to_md(content: str, candidate_name: str) -> str:
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    safe_name = re.sub(r"[^\w\-]", "_", candidate_name) or "resume"
+    filepath = os.path.join(EXPORT_DIR, f"{safe_name}_Resume_Tailored.md")
+
+    body = content.strip()
+    if not re.match(r"^\s*#\s", body) and candidate_name.strip():
+        body = f"# {candidate_name.strip()}\n\n{body}"
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(body + "\n")
+    return filepath
+
+
+# ---------------------------------------------------------------------------
+# PDF —— reportlab Platypus 自己排版（xhtml2pdf 的中文渲染有缺陷，见 git 历史）
+# ---------------------------------------------------------------------------
 _CJK_FONT_CANDIDATES = [
     r"C:\Windows\Fonts\simhei.ttf",
     r"C:\Windows\Fonts\msyh.ttc",
@@ -115,17 +236,10 @@ _CJK_FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/System/Library/Fonts/PingFang.ttc",
 ]
-
 _cjk_font_registered = False
 
 
 def _register_cjk_font() -> str:
-    """
-    找一个系统里真实存在的 CJK 字体注册给 reportlab，返回注册后的字体名。
-    一个都找不到就退回 Helvetica（这种情况下中文内容依然会乱码，是环境
-    限制——生产部署时应该确保至少有一个可用的 CJK 字体）。
-    只注册一次，重复调用直接复用。
-    """
     global _cjk_font_registered
     if _cjk_font_registered:
         return "CJKFont"
@@ -137,131 +251,130 @@ def _register_cjk_font() -> str:
     return "Helvetica"
 
 
-# 简单的行级解析：标题(#)/加粗开头的条目小标题/项目符号(- 或 * + 空格)/普通段落。
-# 简历内容本来就结构简单（LLM 输出遵循 TAILOR_SYSTEM_PROMPT 的格式约定），
-# 不需要上完整的 Markdown 解析器。
-_BOLD_INLINE = re.compile(r"\*\*(.+?)\*\*")
-_CJK_CHAR = re.compile(r"[一-鿿]")
-
-
-def _markdown_inline_to_reportlab(text: str) -> str:
-    """把行内 **加粗** 转成 reportlab Paragraph 认的 <b>...</b> mini-HTML 标记。"""
-    return _BOLD_INLINE.sub(r"<b>\1</b>", text)
-
-
-def _pick_font(text: str, cjk_font: str) -> str:
-    """
-    整行只要出现一个中文字符就用 CJK 字体渲染整行——中文字体渲染
-    ASCII 字符（数字、竖线分隔符）观感上没问题，比按字符切换字体简单
-    可靠。纯英文行用 Helvetica（reportlab 内置字体），观感比强制套用
-    中文字体（字间距会变得很宽，实测坐实过）更专业、更符合英文简历的
-    排版习惯。
-    """
-    return cjk_font if _CJK_CHAR.search(text) else "Helvetica"
+def _font_for(text: str, cjk_font: str, bold: bool = False) -> str:
+    if _CJK_CHAR.search(text):
+        return cjk_font
+    return "Helvetica-Bold" if bold else "Helvetica"
 
 
 def export_resume_to_pdf(content: str, candidate_name: str) -> str:
-    """
-    把定制简历内容导出成 .pdf——直接用 reportlab Platypus 排版
-    （不再经过 xhtml2pdf 的 HTML 层，原因见上面的注释）。
-    """
     os.makedirs(EXPORT_DIR, exist_ok=True)
-    safe_name = re.sub(r"[^\w\-]", "_", candidate_name)
-    filename = f"{safe_name}_Resume_Tailored.pdf"
-    filepath = os.path.join(EXPORT_DIR, filename)
+    safe_name = re.sub(r"[^\w\-]", "_", candidate_name) or "resume"
+    filepath = os.path.join(EXPORT_DIR, f"{safe_name}_Resume_Tailored.pdf")
+    cjk = _register_cjk_font()
 
-    cjk_font = _register_cjk_font()
+    blocks = _parse_blocks(content)
+    if not any(b["type"] == "title" for b in blocks) and candidate_name.strip():
+        blocks.insert(0, {"type": "title", "text": candidate_name.strip()})
 
-    def _style(name: str, text: str, **kwargs) -> ParagraphStyle:
-        return ParagraphStyle(name, fontName=_pick_font(text, cjk_font), **kwargs)
-
-    story = [
-        Paragraph(candidate_name, _style("TitleStyle", candidate_name, fontSize=20, leading=24, alignment=TA_CENTER)),
-        Spacer(1, 0.2 * inch),
-    ]
-
-    bullet_buffer: list[str] = []
+    story = []
+    bullet_buf: list[str] = []
 
     def _flush_bullets():
-        if bullet_buffer:
-            items = [
-                ListItem(Paragraph(
-                    _markdown_inline_to_reportlab(b),
-                    _style("BulletStyle", b, fontSize=11, leading=15),
-                ))
-                for b in bullet_buffer
-            ]
-            story.append(ListFlowable(items, bulletType="bullet", start="circle", leftIndent=18))
-            bullet_buffer.clear()
+        if not bullet_buf:
+            return
+        items = [
+            ListItem(Paragraph(_md_to_html(b), ParagraphStyle(
+                "Bullet", fontName=_font_for(b, cjk), fontSize=10, leading=13.5, spaceAfter=2,
+            )))
+            for b in bullet_buf
+        ]
+        story.append(ListFlowable(items, bulletType="bullet", start="•", leftIndent=14))
+        bullet_buf.clear()
 
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if not stripped:
+    for b in blocks:
+        t = b["type"]
+        if t == "bullet":
+            bullet_buf.append(b["text"])
             continue
+        _flush_bullets()
 
-        # 项目符号：真正的列表标记是 "- "/"* " (符号后面跟空格)，不能只看
-        # "以 - 或 * 开头"——"**加粗**" 开头的字符也是 "*"，之前这里把
-        # "**Company** | Role | Time" 这种"加粗前缀+尾随文本"的条目标题行
-        # 误判成了列表项，lstrip("-*") 只从行首剥符号，行内后半段的 "**"
-        # 配对不上，结尾多出一个裸露的 "**" 字面量（实测坐实过）。
-        is_bullet = stripped.startswith("- ") or (stripped.startswith("* ") and not stripped.startswith("**"))
-
-        if stripped.startswith("#"):
-            _flush_bullets()
-            heading_text = stripped.lstrip("#").strip()
-            story.append(Paragraph(
-                _markdown_inline_to_reportlab(heading_text),
-                _style("HeadingStyle", heading_text, fontSize=12, leading=16, spaceBefore=10, spaceAfter=4),
-            ))
-        elif is_bullet:
-            bullet_buffer.append(stripped[2:].strip())
-        elif stripped.startswith("**"):
-            # 加粗开头的行（不管加粗有没有覆盖整行）当条目小标题处理，
-            # 比如 "**Company | Role | Time**" 或 "**Company** | Role | Time"
-            _flush_bullets()
-            story.append(Paragraph(
-                _markdown_inline_to_reportlab(stripped),
-                _style("HeadingStyle", stripped, fontSize=12, leading=16, spaceBefore=10, spaceAfter=4),
-            ))
-        else:
-            _flush_bullets()
-            story.append(Paragraph(
-                _markdown_inline_to_reportlab(stripped),
-                _style("BodyStyle", stripped, fontSize=11, leading=15),
-            ))
+        if t == "title":
+            story.append(Paragraph(b["text"], ParagraphStyle(
+                "Name", fontName=_font_for(b["text"], cjk, bold=True),
+                fontSize=20, leading=24, alignment=TA_CENTER,
+            )))
+        elif t == "contact":
+            story.append(Paragraph(b["text"], ParagraphStyle(
+                "Contact", fontName=_font_for(b["text"], cjk), fontSize=9.5, leading=12,
+                alignment=TA_CENTER, textColor=colors.HexColor("#444444"), spaceAfter=6,
+            )))
+        elif t == "section":
+            story.append(Spacer(1, 8))
+            story.append(Paragraph(b["text"].upper(), ParagraphStyle(
+                "Section", fontName=_font_for(b["text"], cjk, bold=True),
+                fontSize=12, leading=15, spaceAfter=3,
+            )))
+            story.append(HRFlowable(width="100%", thickness=0.75, color=colors.HexColor("#666666"),
+                                    spaceBefore=0, spaceAfter=5))
+        elif t == "entry":
+            story.append(Spacer(1, 5))
+            story.append(Paragraph(_md_to_html(b["text"]), ParagraphStyle(
+                "Entry", fontName=_font_for(b["text"], cjk, bold=True), fontSize=11, leading=14,
+            )))
+        elif t == "meta":
+            story.append(Paragraph(b["text"], ParagraphStyle(
+                "Meta", fontName=_font_for(b["text"], cjk), fontSize=9.5, leading=12,
+                textColor=colors.HexColor("#555555"),
+            )))
+        elif t == "image":
+            data = _decode_image(b["src"])
+            if data:
+                try:
+                    img = Image(io.BytesIO(data))
+                    ratio = (img.imageHeight / img.imageWidth) if img.imageWidth else 1
+                    img.drawWidth = 1.4 * inch
+                    img.drawHeight = 1.4 * inch * ratio
+                    img.hAlign = "CENTER"
+                    story.append(img)
+                except Exception:
+                    pass
+        else:  # body
+            story.append(Paragraph(_md_to_html(b["text"]), ParagraphStyle(
+                "Body", fontName=_font_for(b["text"], cjk), fontSize=10, leading=13.5,
+            )))
 
     _flush_bullets()
 
-    doc = SimpleDocTemplate(
+    SimpleDocTemplate(
         filepath, pagesize=LETTER,
         leftMargin=0.75 * inch, rightMargin=0.75 * inch,
-        topMargin=0.75 * inch, bottomMargin=0.75 * inch,
-    )
-    doc.build(story)
-
+        topMargin=0.6 * inch, bottomMargin=0.6 * inch,
+    ).build(story)
     return filepath
 
 
 if __name__ == "__main__":
-    # 测试运行：python -m src.tab_b_jobsearch.word_export
-    sample_content = """
-    **AI Agent-Driven Automated Testing System** | Oct 2025
-    - Built an autonomous AI agent system using **LangGraph** and **LangChain**
-    - Integrated Slither and Foundry for vulnerability detection
-    """
-    path = export_resume_to_docx(sample_content, "Fangyu Lin")
-    print(f"docx 已生成: {path}")
+    sample = """# Jane Q. Candidate
 
-    md_path = export_resume_to_md(sample_content, "Fangyu Lin")
-    print(f"md 已生成: {md_path}")
+San Francisco, CA | +1 555 0100 | jane@example.com | github.com/janeq
 
-    pdf_path = export_resume_to_pdf(sample_content, "Fangyu Lin")
-    print(f"pdf 已生成: {pdf_path}")
+## PROFESSIONAL SUMMARY
 
-    zh_content = """
-    **阿里巴巴 | 高级后端工程师 | 2020年3月至今**
-    - 主导了系统重构项目，将平均响应时间降低了一半
-    - 带领团队完成了微服务化改造
-    """
-    zh_pdf_path = export_resume_to_pdf(zh_content, "李明测试")
-    print(f"中文 pdf 已生成: {zh_pdf_path}")
+- Backend engineer with 5 years building data-intensive services.
+
+## TECHNICAL SKILLS
+
+- **Languages:** Python, Go, SQL
+
+## PROFESSIONAL EXPERIENCE
+
+### Acme Corp | Payments Platform | Senior Engineer
+Jan 2022 - Present
+
+- Cut checkout latency by half by redesigning the settlement pipeline.
+- Mentored three engineers on distributed systems.
+
+## PERSONAL PROJECT
+
+### Open Source Rate Limiter
+2023
+
+- Built a token-bucket limiter used by 400+ repos.
+
+## EDUCATION
+
+**State University** | B.S. Computer Science | 2013 - 2017
+"""
+    for fn in (export_resume_to_docx, export_resume_to_md, export_resume_to_pdf):
+        print(fn.__name__, "->", fn(sample, "Jane Q. Candidate"))

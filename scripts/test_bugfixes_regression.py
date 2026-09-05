@@ -493,6 +493,199 @@ def test_split_sentences_reflows_pdf_soft_wraps():
     print("[PASS] test_split_sentences_reflows_pdf_soft_wraps")
 
 
+# 实测坐实过一次严重 bug：定制简历生成把"检索 top_k 片段 -> LLM 凭空攒一份"，
+# 结果姓名被压成 "zhibinliu"、联系方式/summary/技能/教育整段消失、职位头衔全丢、
+# 一条经历少了一半 bullet，两个 PERSONAL PROJECT 还被当工作经历排到真实经历前面。
+# 重做成"以完整原文为底稿，只在 EXPERIENCE/PROJECT 的 bullet 层做重排 + 措辞微调，
+# 其余原样保留"。下面这份 markdown 按真实简历（Zhibin Liu）的结构复现，占位 PII。
+_SAMPLE_FULL_RESUME_MD = """# **Alex (Sample) Doe**
+
+Toronto, ON | +1 (555) 000-0000 | alex.sample@example.com | https://github.com/alexsample
+
+## **PROFESSIONAL SUMMARY**
+
+- 3+ years of enterprise engineering experience in AI applications and distributed systems.
+
+- Proven expertise building RAG systems, AI agents, and real-time data processing architectures.
+
+## **TECHNICAL SKILLS**
+
+- **AI & LLM:** LLM, RAG, LangGraph, Embedding Models, Vector Database
+
+- **Big Data & Streaming:** Apache Flink, Kafka, Spark.
+
+## **PROFESSIONAL EXPERIENCE**
+
+#### **Acme Technologies | Industrial Diagnosis Platform (RAG + LLM) | AI Engineer |**
+
+Feb 2025 – July 2025
+
+- Led the migration of a legacy system to a RAG-powered diagnosis platform, increasing Top-1 accuracy from 70% to 85%.
+
+- Designed the end-to-end retrieval pipeline through knowledge normalization, semantic chunking and LLM reasoning.
+
+#### **Acme Technologies | Test Data Processing Platform | Data Engineer |**
+
+June 2023 – Feb 2025
+
+- Led the refactoring of distributed Flink data pipelines processing tens of billions of records.
+
+- Designed an end-to-end data reliability framework; ensured 99.99% data completeness while cutting recovery time from 30 minutes to under 5.
+
+### **Acme Technologies | Enterprise Partner Management Platform | Backend Engineer |**
+
+April 2022 – June 2023
+
+- Redesigned a legacy backend platform into a scalable microservices architecture with a 3B+ record migration.
+
+## **PERSONAL PROJECT**
+
+**Multi-Agent Smart Contract Security System |** 2025 – 2026
+
+- Built a LangGraph-based multi-agent security framework for automated vulnerability detection.
+
+- Implemented state-driven agent orchestration with static analysis and sandbox execution.
+
+#### **AI Agent-driven Market Intelligence Platform |** 2026
+
+- Built a real-time market intelligence platform combining Kafka, Flink and ClickHouse with LLM agents.
+
+## **EDUCATION**
+
+**Test University |** Testville, TC
+
+Master of Engineering in Test Science | Sep 2019 – Mar 2022
+"""
+
+
+def test_resume_document_parser_captures_everything():
+    """
+    离线钉住结构化解析：姓名/联系方式/summary/技能/教育背景一项不少，三段工作经历
+    的公司+职位头衔+时间三项完整，PERSONAL PROJECT 独立成板块且排在工作经历之后。
+    """
+    from src.core.resume_document import parse_resume_document, render_markdown
+
+    doc = parse_resume_document(_SAMPLE_FULL_RESUME_MD)
+
+    assert doc.name == "Alex (Sample) Doe", doc.name
+    assert doc.contact_lines and "alex.sample@example.com" in doc.contact_lines[0]
+
+    summary = doc.section("summary")
+    skills = doc.section("skills")
+    education = doc.section("education")
+    assert summary and len(summary.body_lines) >= 2, "SUMMARY 丢了"
+    assert skills and any("Flink" in l for l in skills.body_lines), "SKILLS 丢了"
+    assert education and any("Test University" in l for l in education.body_lines), "EDUCATION 丢了"
+
+    exp = doc.section("experience")
+    assert exp and len(exp.entries) == 3, f"应有 3 段工作经历，实际 {len(exp.entries) if exp else 0}"
+    titles = [e.title for e in exp.entries]
+    assert any(t.endswith("AI Engineer") for t in titles), titles
+    assert any(t.endswith("Data Engineer") for t in titles), titles
+    assert any(t.endswith("Backend Engineer") for t in titles), titles
+    for e in exp.entries:
+        assert e.date, f"「{e.title}」时间丢了"
+        assert e.bullets, f"「{e.title}」bullet 丢了"
+    # 第二段有 2 条 bullet（数据完整性/恢复时间那条不能被丢）
+    data_eng = next(e for e in exp.entries if e.title.endswith("Data Engineer"))
+    assert len(data_eng.bullets) == 2 and any("99.99%" in b for b in data_eng.bullets)
+
+    proj = doc.section("projects")
+    assert proj and len(proj.entries) == 2, "PERSONAL PROJECT 应独立成板块、含 2 条"
+
+    rendered = render_markdown(doc)
+    assert rendered.index("## PROFESSIONAL EXPERIENCE") < rendered.index("## PERSONAL PROJECT"), \
+        "PERSONAL PROJECT 必须排在 PROFESSIONAL EXPERIENCE 之后"
+
+    print("[PASS] test_resume_document_parser_captures_everything")
+
+
+def test_structural_review_catches_content_loss():
+    """
+    离线钉住确定性校验：定制结果一旦丢内容/改标题/少 bullet，必须被 _entries_intact /
+    _verbatim_sections_intact 抓出来。
+    """
+    from src.core.resume_document import parse_resume_document, ResumeDocument, ResumeSection, ResumeEntry
+    from src.tab_b_jobsearch.resume_generator import _verbatim_sections_intact, _entries_intact
+
+    original = parse_resume_document(_SAMPLE_FULL_RESUME_MD)
+
+    # 篡改：丢掉 summary、砍一条 bullet、改一个职位头衔
+    broken = ResumeDocument(
+        name=original.name, contact_lines=list(original.contact_lines),
+        image_lines=list(original.image_lines), sections=[],
+    )
+    for s in original.sections:
+        if s.kind == "summary":
+            continue  # 整段丢失
+        if s.kind == "experience":
+            new_entries = []
+            for i, e in enumerate(s.entries):
+                bullets = e.bullets[:-1] if i == 1 else list(e.bullets)   # 第 2 段砍一条 bullet
+                title = e.title.replace("AI Engineer", "Principal AI Architect") if i == 0 else e.title
+                new_entries.append(ResumeEntry(title=title, date=e.date, bullets=bullets))
+            s = ResumeSection(title=s.title, kind=s.kind, entries=new_entries)
+        broken.sections.append(s)
+
+    issues = _verbatim_sections_intact(original, broken) + _entries_intact(original, broken)
+    joined = " ".join(issues)
+    assert "summary" in joined.lower() or "SUMMARY" in joined, issues
+    assert "bullet" in joined, issues
+    assert "标题被改动" in joined or "不是原简历里的条目" in joined, issues
+
+    # 未篡改的文档：不应报任何问题
+    assert not (_verbatim_sections_intact(original, original) + _entries_intact(original, original))
+
+    print("[PASS] test_structural_review_catches_content_loss")
+
+
+def test_tailored_resume_preserves_key_fields():
+    """
+    需要 LLM（真实调 DeepSeek）。没有 key / 网络不通就 SKIP。
+    定制之后：姓名、联系方式、summary、技能、教育背景一字不改；三段工作经历的
+    公司/职位头衔/时间/全部 bullet 都在；PERSONAL PROJECT 独立成板块排在经历之后。
+    """
+    import os as _os
+    if not _os.getenv("DEEPSEEK_API_KEY"):
+        print("[SKIP] test_tailored_resume_preserves_key_fields（没有 DEEPSEEK_API_KEY）")
+        return
+
+    from src.core.resume_document import parse_resume_document
+    from src.tab_b_jobsearch.resume_generator import generate_tailored_resume
+
+    doc = parse_resume_document(_SAMPLE_FULL_RESUME_MD)
+    jd = ("Senior AI Engineer building production RAG systems and LLM agents. Python, LangGraph, "
+          "vector databases, semantic retrieval, end-to-end retrieval pipelines.")
+    try:
+        res = generate_tailored_resume(doc, jd)
+    except (ConnectionError, TimeoutError, OSError) as e:
+        print(f"[SKIP] test_tailored_resume_preserves_key_fields（网络不通：{e}）")
+        return
+
+    out = res["tailored_resume"]
+    assert res["passed_review"], f"结构校验没过：{res['issue']}"
+
+    for must in (
+        "Alex (Sample) Doe",
+        "alex.sample@example.com",
+        "3+ years of enterprise engineering experience",       # summary 原句
+        "**Big Data & Streaming:** Apache Flink, Kafka, Spark", # skills 原句
+        "Master of Engineering in Test Science",               # education 原句
+        "AI Engineer", "Data Engineer", "Backend Engineer",    # 三个职位头衔
+        "99.99% data completeness",                            # 那条差点被丢的 bullet
+        "Feb 2025 – July 2025", "June 2023 – Feb 2025", "April 2022 – June 2023",
+    ):
+        assert must in out, f"定制结果里丢了：{must!r}"
+
+    assert out.index("## PROFESSIONAL EXPERIENCE") < out.index("## PERSONAL PROJECT")
+
+    # bullet 数量守恒：原文 6 条经历 bullet + 3 条项目 bullet
+    assert out.count("\n- ") == _SAMPLE_FULL_RESUME_MD.count("\n- "), \
+        f"bullet 总数变了：原 {_SAMPLE_FULL_RESUME_MD.count(chr(10)+'- ')}，现 {out.count(chr(10)+'- ')}"
+
+    print("[PASS] test_tailored_resume_preserves_key_fields")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -506,4 +699,7 @@ if __name__ == "__main__":
     test_workday_job_content_via_cxs_api()
     test_resume_chunk_dedup()
     test_split_sentences_reflows_pdf_soft_wraps()
+    test_resume_document_parser_captures_everything()
+    test_structural_review_catches_content_loss()
+    test_tailored_resume_preserves_key_fields()
     print("\n全部回归测试通过。")
