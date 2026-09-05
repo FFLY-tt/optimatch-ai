@@ -36,6 +36,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from urllib.parse import urlsplit, parse_qs
 
 import requests
 from dotenv import load_dotenv
@@ -49,6 +50,127 @@ ENDPOINT = "https://api.anysearch.com/mcp"
 CLIENT_HEADER = "optimatch-ai/1.0"
 
 _URL_PATTERN = re.compile(r"https?://\S+")
+
+
+# ============================================================================
+# 职位"聚合/搜索/分类列表页" vs "单条职位详情页" 判别
+# ----------------------------------------------------------------------------
+# AnySearch 是通用网页搜索引擎，不是职位板 API。search_agent 让 LLM 把
+# "找 XX 职位" 拆成几条查询丢给它，排在最前面的结果往往正是各种"职位列表页"
+# （Arc.dev 的分类页 arc.dev/remote-jobs/llm、Wellfound 的搜索页
+# wellfound.com/role/l/ai-engineer/...、LinkedIn/Indeed 的搜索结果页……），
+# 里面是一堆不同职位，不是某一条。这种页面被当成单条职位塞进结果后：
+#   - fit_score 拿一整页杂七杂八的正文去算，分数没意义
+#   - "用这条生成简历" 会拿这页 soup 去定制简历
+#   - "自动投递" 会拿列表页 URL 去填表，必然出错
+# 所以 platform_type == "job" 时，把明显是列表页的结果直接过滤掉。
+# ============================================================================
+
+# 明确是"单条职位详情"的 URL 形态——命中就直接放行，不再做列表页判断，
+# 避免把 boards.greenhouse.io/acme/jobs/123456 这种真实详情页误杀。
+_JOB_DETAIL_URL_RE = re.compile(
+    r"greenhouse\.io/[^/]+/jobs/\d+"
+    r"|(jobs\.)?lever\.co/[^/]+/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}"
+    r"|jobs\.ashbyhq\.com/[^/]+/[0-9a-f]{8}-[0-9a-f]{4}"
+    r"|myworkdayjobs\.com/.+/job/"
+    r"|linkedin\.com/jobs/view/\d+"
+    r"|indeed\.com/(viewjob|rc/clk)"
+    r"|[?&](jk|gh_jid|lever-source|gh_src)="
+    r"|smartrecruiters\.com/[^/]+/\d{6,}"
+    r"|(jobs\.)?workable\.com/(j|view)/[a-z0-9]+"
+    r"|/(job|jobs|position|posting|opening)/\d{3,}"          # 泛化：路径里带具体数字 id
+    r"|reddit\.com/r/[^/]+/comments/[a-z0-9]+/"              # Reddit 单帖（招聘帖）也是单条内容
+    r"|/(job|jobs|careers?)/[a-z0-9-]{3,}-[a-z0-9]*\d[a-z0-9]*$",  # 带 slug + 尾部含数字的具体 id
+    re.IGNORECASE,
+)
+
+# 这些站点本身就是"职位搜索引擎"——它上面除了明确的详情页（已被上面的
+# _JOB_DETAIL_URL_RE 放行）以外，基本都是搜索/列表页，直接按列表页处理。
+_JOB_SEARCH_ENGINE_HOSTS = (
+    "ziprecruiter.com", "indeed.com", "glassdoor.com", "glassdoor.ca",
+    "monster.com", "dice.com", "simplyhired.com", "talent.com",
+    "wellfound.com", "linkedin.com", "crossover.com", "remoterocketship.com",
+    "dailyremote.com", "wantremote.com", "jobright.ai", "adzuna.com",
+)
+
+# 明确是"列表/搜索/分类页"的 URL 路径特征。
+_JOB_LISTING_PATH_RE = re.compile(
+    r"/remote-jobs(/|$)"
+    r"|/role/[lr]/"
+    r"|/jobs/search"
+    r"|/jobs/collections"
+    r"|/job-search(/|$)"
+    r"|/search(/|$)"
+    r"|/jobs-in-"
+    r"|/find-work(/|$)"
+    r"|/find-(a-)?jobs?(/|$)"
+    r"|/(q|k|l)-[^/]*-jobs"
+    r"|/browse(-jobs)?(/|$)"
+    r"|/categor(y|ies)/"
+    r"|/jobs/[a-z-]+-jobs(/|$)",       # arc.dev/remote-jobs/llm 之外的 /jobs/python-jobs 变体
+    re.IGNORECASE,
+)
+
+# 路径就停在这些词、后面没有具体 slug/id：也是列表页（公司 careers 落地页那种）。
+_JOB_LISTING_PATH_TAIL_RE = re.compile(
+    r"/(jobs|careers?|openings|positions|vacancies|opportunities|roles)$",
+    re.IGNORECASE,
+)
+
+# 列表页在 URL query 里常见的搜索参数键。
+_JOB_LISTING_QUERY_KEYS = {"q", "query", "keyword", "keywords", "search", "searchkeyword", "k", "l"}
+
+# 标题层面的信号——聚合站的 SEO 标题模式（"XX Jobs in YY"、"XX Jobs (Sep 2026)"、
+# "1,200 XX Jobs"、"Browse/Explore/Find XX Jobs"），单条职位标题几乎不会长这样。
+_JOB_LISTING_TITLE_RE = re.compile(
+    r"\bjobs\b\s*(\(|\bin\b|\bnear\b|-|\||$)"
+    r"|^\s*\d[\d,]*\+?\s+\S.*\bjobs\b"
+    r"|\b(browse|explore|find|search|latest|top|best|all)\b[^.]{0,40}\bjobs\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_job_listing_page(url: str, title: str = "") -> bool:
+    """
+    这个 URL / 标题看起来是"职位聚合 / 搜索 / 分类列表页"（一页里一堆不同职位），
+    而不是单条职位详情页。用于把 AnySearch 搜到的这类页面从求职结果里剔除。
+    """
+    if not url:
+        return False
+
+    u = url.strip().lower()
+    parts = urlsplit(u)
+    host = parts.netloc.split("@")[-1].split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    path = parts.path.rstrip("/")
+    query_keys = set(parse_qs(parts.query).keys())
+
+    # 1) 一眼就是单条详情页 —— 放行
+    if _JOB_DETAIL_URL_RE.search(u):
+        return False
+
+    # 2) 职位搜索引擎站点（除详情页外都是搜索/列表页）
+    if any(host == h or host.endswith("." + h) for h in _JOB_SEARCH_ENGINE_HOSTS):
+        return True
+
+    # 3) 列表 / 搜索 / 分类路径
+    if _JOB_LISTING_PATH_RE.search(path + "/"):
+        return True
+
+    # 4) 路径停在 /jobs、/careers 等，后面没有具体职位
+    if _JOB_LISTING_PATH_TAIL_RE.search(path):
+        return True
+
+    # 5) jobs / careers 路径上带搜索 query 参数
+    if ("job" in path or "career" in path or "job" in host) and (query_keys & _JOB_LISTING_QUERY_KEYS):
+        return True
+
+    # 6) 标题是聚合站 SEO 模式，且 URL 不是已知的单条详情形态
+    if title and _JOB_LISTING_TITLE_RE.search(title):
+        return True
+
+    return False
 
 
 def _headers() -> dict:
@@ -326,6 +448,23 @@ def search(
         )
 
     parsed_items = _parse_results_text(text)
+
+    # 求职场景：把明显是"职位列表/搜索/分类页"的结果剔掉——它们不是单条职位，
+    # 拿去定制简历 / 自动投递都是错的。放在 extract 之前，顺带省掉对这些页面的
+    # extract 调用。business 场景不动（Tab A 有自己的 filter_real_leads 逻辑）。
+    if platform_type == "job" and parsed_items:
+        kept, dropped = [], []
+        for item in parsed_items:
+            if looks_like_job_listing_page(item.get("url", ""), item.get("title", "")):
+                dropped.append(item)
+            else:
+                kept.append(item)
+        if dropped:
+            print(
+                f"  [AnySearch] 过滤掉 {len(dropped)} 条职位列表/聚合页（非单条职位）："
+                + "; ".join(f"{d.get('title', '')!r} <{d.get('url', '')}>" for d in dropped)
+            )
+        parsed_items = kept
 
     if extract_content and parsed_items:
         urls_to_extract = {

@@ -243,6 +243,61 @@ def test_entry_title_and_date_on_separate_lines_keep_all_tags():
     print("[PASS] test_entry_title_and_date_on_separate_lines_keep_all_tags")
 
 
+# 实测坐实过一次真实 bug：AnySearch（通用网页搜索引擎，不是职位板 API）给求职
+# 搜索返回的部分结果，链接指向的是"职位聚合/分类/搜索列表页"而不是单条职位详情
+# （例如 arc.dev/remote-jobs/llm、wellfound.com/role/l/ai-engineer/canada-startups）。
+# 这种页面被当成单条职位塞进结果后，"用这条生成简历"会拿一整页不相关职位去定制，
+# "自动投递"会拿列表页 URL 去填表，必然出错。修复：platform_type == "job" 时，
+# anysearch_connector 用 looks_like_job_listing_page() 把这类结果过滤掉，
+# apply_router 里再兜一道（漏过的列表页 URL 不允许发起自动投递）。
+def test_anysearch_job_listing_pages_are_detected():
+    """
+    回归钉住上面描述的 bug：职位列表/聚合页要能被 looks_like_job_listing_page()
+    识别出来（返回 True），单条职位详情页不能被误伤（返回 False）。
+    纯函数判断，不发网络请求。
+    """
+    from src.connectors.anysearch_connector import looks_like_job_listing_page
+
+    # 用户实际反馈的两条问题结果，必须判成"列表页"
+    assert looks_like_job_listing_page(
+        "https://arc.dev/remote-jobs/llm", "Remote LLM Jobs (September 2026) - Arc.dev"
+    ), "arc.dev 分类列表页没被识别出来"
+    assert looks_like_job_listing_page(
+        "https://wellfound.com/role/l/ai-engineer/canada-startups", "AI Engineer Jobs in Canada - 2026"
+    ), "wellfound 搜索结果页没被识别出来"
+
+    # 其它常见聚合/搜索页形态（含首轮实测漏过、后来补上的 ziprecruiter 搜索页 /
+    # remoteai /find-work / 子域名 ca.linkedin.com 这几种）
+    for url in (
+        "https://www.indeed.com/q-ai-engineer-l-canada-jobs.html",
+        "https://www.linkedin.com/jobs/search/?keywords=software%20engineer",
+        "https://weworkremotely.com/categories/remote-back-end-programming-jobs",
+        "https://acme.com/careers",
+        "https://www.ziprecruiter.com/Jobs/Ai-Engineer-Remote-Canada",
+        "https://remoteai.io/find-work/canada",
+        "https://ca.linkedin.com/jobs/artificial-intelligence-engineer-jobs",
+        "https://www.glassdoor.ca/Job/canada-machine-learning-engineer-jobs-SRCH_IL.0,6_IN3_KO7,32.htm",
+        "https://www.crossover.com/jobs/ai-engineer/ca",
+    ):
+        assert looks_like_job_listing_page(url), f"聚合/搜索页漏判：{url}"
+
+    # 单条职位详情页 / 单条帖子——绝不能被误伤（否则真实职位会被静默丢掉）
+    for url, title in (
+        ("https://news.ycombinator.com/item?id=41889468", "Senior Golang Developer"),
+        ("https://job-boards.greenhouse.io/reddit/jobs/7997866", "Software Engineer at Reddit"),
+        ("https://jobs.lever.co/veeva/8fe22df0-02b4-453d-919c-c8998cf913f6", "Associate Software Engineer"),
+        ("https://www.linkedin.com/jobs/view/3901234567", "AI Engineer"),
+        ("https://jobs.ashbyhq.com/foobar/6d5c4b3a-1234-5678-9abc-def012345678", "Data Engineer at Foobar"),
+        # Reddit 招聘帖是单条内容（跟 HN "who's hiring" 一条评论一样），保留
+        ("https://www.reddit.com/r/SoftwareEngineerJobs/comments/1oniqs0/hiring_x/", "Hiring Software & AI Engineers (US/Canada Remote)"),
+        # 公司 careers 页带具体职位 slug（尾部有 id），是详情页不是落地页
+        ("https://acme.com/careers/senior-ml-engineer-4a9f2b", "Senior ML Engineer"),
+    ):
+        assert not looks_like_job_listing_page(url, title), f"单条职位详情页被误判成列表页：{url}"
+
+    print("[PASS] test_anysearch_job_listing_pages_are_detected")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -250,4 +305,5 @@ if __name__ == "__main__":
     test_degree_extraction_does_not_false_positive_on_substring()
     test_resume_with_mixed_heading_level_entries_still_produces_chunks()
     test_entry_title_and_date_on_separate_lines_keep_all_tags()
+    test_anysearch_job_listing_pages_are_detected()
     print("\n全部回归测试通过。")

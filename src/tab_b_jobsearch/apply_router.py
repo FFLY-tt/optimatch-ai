@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from src.tab_b_jobsearch.apply.orchestrator import start_application, confirm_submit, cancel, ApplyError
 from src.core.status_store import update_status
 from src.core.resume_by_job_store import get_resume_for_job
+from src.connectors.anysearch_connector import looks_like_job_listing_page
 
 router = APIRouter(tags=["Tab B - Auto Apply"])
 
@@ -55,6 +56,17 @@ class StartApplyResponse(BaseModel):
 
 @router.post("/api/apply/start", response_model=StartApplyResponse)
 def apply_start(request: StartApplyRequest):
+    # 兜底：万一有职位列表/聚合页漏过了 anysearch 那层过滤，别真的拿它去打开浏览器
+    # 填表——那页上是一堆不同职位，没有可投的表单。直接告诉用户点职位标题手动看。
+    if looks_like_job_listing_page(request.job_url):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "这条结果的链接指向的是职位列表/搜索页，不是某一条具体职位的申请页，"
+                "没法自动投递。请点职位标题打开原链接，手动挑一条具体职位再操作。"
+            ),
+        )
+
     try:
         draft = start_application(
             job_id=request.job_id,
