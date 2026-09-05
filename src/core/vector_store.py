@@ -25,6 +25,7 @@ data/chroma_db 重新建，不需要做迁移逻辑。
 
 import json
 import os
+import re
 import uuid
 
 import chromadb
@@ -115,8 +116,18 @@ def _flatten_tags(tags: dict) -> dict:
     Chroma 的 metadata 只接受标量值（str/int/float/bool），不能直接存嵌套 dict，
     也不接受 None。resume_ast.py / jd_parser.py 产出的 tags 里经常有 None
     （比如没抠到 role），这里统一转成空字符串再存。
+    Chroma 还不接受空 dict——tags 整个是空的时候兜一个 source 标记，避免 add 直接抛错。
     """
-    return {k: ("" if v is None else v) for k, v in tags.items()}
+    flat = {k: ("" if v is None else v) for k, v in (tags or {}).items()}
+    return flat or {"source": "resume"}
+
+
+def normalize_chunk_text(text: str) -> str:
+    """
+    归一化 chunk 文本，用于"内容是否重复"的判断：小写 + 折叠所有空白 + 去掉首尾标点。
+    match_scoring 的检索去重也用这个，保证两处"什么算重复"的口径一致。
+    """
+    return re.sub(r"\s+", " ", (text or "").strip().lower()).strip(" .,:;!?-—–·")
 
 
 def add_resume_chunks(chunks: list[dict], collection_name: str = RESUME_CHUNKS_COLLECTION) -> int:
@@ -127,23 +138,51 @@ def add_resume_chunks(chunks: list[dict], collection_name: str = RESUME_CHUNKS_C
     chunks: [{"text": str, "tags": dict}, ...]
         （resume_ast.parse_resume_markdown()["chunks"] 或
          resume_ast.parse_free_text_note() 的产出格式）
-    返回：本次新增的 chunk 数量
+    返回：本次真正新增（去重后）的 chunk 数量
+
+    去重说明：同一份简历被重复上传时（用户很常见的操作："传个更新版"），
+    add 纯追加会把每条经历 chunk 存成 N 份，检索时 top_k 会被同一段内容占满
+    多个名额（实测坐实过一次：56 条 chunk 里只有 14 条不同，每条 ×4）。
+    这里按归一化文本跟已有内容 + 本批内部比对，只写真正没见过的 chunk。
     """
     if not chunks:
         return 0
 
     client = get_chroma_client()
-    model = get_model()
     collection = client.get_or_create_collection(collection_name)
 
-    texts = [c["text"] for c in chunks]
+    try:
+        existing_docs = collection.get(include=["documents"]).get("documents") or []
+    except Exception:
+        existing_docs = []
+    seen = {normalize_chunk_text(t) for t in existing_docs}
+
+    fresh: list[dict] = []
+    for c in chunks:
+        key = normalize_chunk_text(c["text"])
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        fresh.append(c)
+
+    skipped = len(chunks) - len(fresh)
+    if not fresh:
+        print(f"  [调试] {len(chunks)} 条 chunk 都已存在（重复上传？），未新增")
+        return 0
+
+    model = get_model()
+    texts = [c["text"] for c in fresh]
     embeddings = model.encode(texts).tolist()
-    ids = [f"chunk_{uuid.uuid4().hex}" for _ in chunks]
-    metadatas = [_flatten_tags(c.get("tags", {})) for c in chunks]
+    ids = [f"chunk_{uuid.uuid4().hex}" for _ in fresh]
+    metadatas = [_flatten_tags(c.get("tags", {})) for c in fresh]
 
     collection.add(ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas)
-    print(f"  [调试] 追加 {len(chunks)} 条 chunk 到 Chroma collection '{collection_name}'（累计存储，不清空旧数据）")
-    return len(chunks)
+    print(
+        f"  [调试] 追加 {len(fresh)} 条新 chunk 到 Chroma collection '{collection_name}'"
+        + (f"（跳过 {skipped} 条重复）" if skipped else "")
+        + "（累计存储，不清空旧数据）"
+    )
+    return len(fresh)
 
 
 def get_all_resume_chunks(collection_name: str = RESUME_CHUNKS_COLLECTION) -> list[dict]:
@@ -152,6 +191,9 @@ def get_all_resume_chunks(collection_name: str = RESUME_CHUNKS_COLLECTION) -> li
     需要用的时候自己现算——corpus 通常就几十上百条，重新编码成本很低，
     没必要依赖 Chroma 能不能把已存的 embedding 原样吐回来这种细节）。
     collection 还没建过（用户还没上传过简历）时返回空列表，不抛异常。
+
+    按归一化文本去重（保留第一条）——既是给历史上已经被重复上传污染的
+    collection 做无损自愈，也是 add_resume_chunks 去重之外的第二道保险。
     """
     client = get_chroma_client()
     try:
@@ -161,9 +203,43 @@ def get_all_resume_chunks(collection_name: str = RESUME_CHUNKS_COLLECTION) -> li
 
     result = collection.get(include=["documents", "metadatas"])
     chunks = []
+    seen: set[str] = set()
     for doc_id, text, meta in zip(result["ids"], result["documents"], result["metadatas"]):
+        key = normalize_chunk_text(text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
         chunks.append({"id": doc_id, "text": text, "tags": meta})
     return chunks
+
+
+def dedupe_resume_chunks(collection_name: str = RESUME_CHUNKS_COLLECTION) -> dict:
+    """
+    一次性物理清理 collection 里的重复 chunk（历史上简历被重复上传攒下的）：
+    按归一化文本保留每种内容的第一条，其余从 Chroma 删掉。
+    返回 {"before", "after", "removed"}。collection 不存在时三个数都是 0。
+    """
+    client = get_chroma_client()
+    try:
+        collection = client.get_collection(collection_name)
+    except Exception:
+        return {"before": 0, "after": 0, "removed": 0}
+
+    result = collection.get(include=["documents"])
+    ids, texts = result["ids"], result["documents"]
+
+    seen: set[str] = set()
+    to_delete: list[str] = []
+    for doc_id, text in zip(ids, texts):
+        key = normalize_chunk_text(text)
+        if not key or key in seen:
+            to_delete.append(doc_id)
+        else:
+            seen.add(key)
+
+    if to_delete:
+        collection.delete(ids=to_delete)
+    return {"before": len(ids), "after": len(ids) - len(to_delete), "removed": len(to_delete)}
 
 
 def reset_resume_chunks(collection_name: str = RESUME_CHUNKS_COLLECTION) -> None:

@@ -405,6 +405,58 @@ def test_workday_job_content_via_cxs_api():
     print(f"[PASS] test_workday_job_content_via_cxs_api（拿到 {len(text)} 字符 JD 正文）")
 
 
+# 实测坐实过一次真实 bug：定制简历生成里，top_k=5 检索出来的 5 条"匹配片段"有 4 条
+# 内容完全相同（同一段 Kafka/Flink 经历）。根因是 add_resume_chunks 纯追加、不去重——
+# 同一份简历被重复上传（"传个更新版"）就把每条 chunk 存成 N 份（实测 56 条里只有 14
+# 条不同，每条 ×4），检索时 top_k 被同一段内容占满多个名额，喂给 LLM 的"原文"其实
+# 只有一段，定制质量直接崩。修复：add 时按归一化文本去重、get 时读侧再去一道、
+# 检索返回 top_k 前也去一道，另加 dedupe_resume_chunks() 物理清理历史脏数据。
+def test_resume_chunk_dedup():
+    from src.core.vector_store import (
+        normalize_chunk_text, add_resume_chunks, get_all_resume_chunks, reset_resume_chunks,
+    )
+    from src.core.match_scoring import _dedupe_by_text
+
+    # --- 归一化口径 ---
+    assert normalize_chunk_text("  Built  a\nPipeline. ") == "built a pipeline"
+    assert normalize_chunk_text("Built a pipeline") == normalize_chunk_text("built a Pipeline.")
+    assert normalize_chunk_text("...") == ""
+
+    # --- 检索侧去重（纯函数，离线）---
+    scored = [
+        {"text": "Built a Kafka pipeline.", "score": 0.9, "tags": {}},
+        {"text": "built a kafka pipeline", "score": 0.9, "tags": {}},   # 归一化后同上
+        {"text": "Built a Kafka pipeline.", "score": 0.8, "tags": {}},  # 完全一样
+        {"text": "Designed an ML model.", "score": 0.7, "tags": {}},
+    ]
+    deduped = _dedupe_by_text(scored)
+    assert [d["text"] for d in deduped] == ["Built a Kafka pipeline.", "Designed an ML model."], deduped
+
+    # --- 摄入侧去重（用一个临时 collection，不碰真实简历数据）---
+    tmp = "test_dedup_tmp_collection"
+    reset_resume_chunks(tmp)
+    try:
+        batch = [
+            {"text": "Led the migration of a legacy system to a RAG platform.", "tags": {"company": "Acme"}},
+            {"text": "Designed the end-to-end retrieval pipeline.", "tags": {"company": "Acme"}},
+            {"text": "Built a real-time streaming architecture with Kafka and Flink.", "tags": {"company": "Acme"}},
+        ]
+        n1 = add_resume_chunks(batch, collection_name=tmp)
+        assert n1 == 3, f"首次应写入 3 条，实际 {n1}"
+        n2 = add_resume_chunks(batch, collection_name=tmp)       # 重复上传同一份
+        assert n2 == 0, f"重复上传不该新增，实际新增 {n2}"
+        n3 = add_resume_chunks(
+            batch + [{"text": "New bullet added in the updated resume.", "tags": {}}],
+            collection_name=tmp,
+        )
+        assert n3 == 1, f"只有那条新 bullet 该被写入，实际 {n3}"
+        assert len(get_all_resume_chunks(tmp)) == 4, "临时 collection 最终应是 4 条 distinct chunk"
+    finally:
+        reset_resume_chunks(tmp)
+
+    print("[PASS] test_resume_chunk_dedup")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -416,4 +468,5 @@ if __name__ == "__main__":
     test_job_relevance_filter_rejects_marketing_pages()
     test_workday_cxs_url_transform()
     test_workday_job_content_via_cxs_api()
+    test_resume_chunk_dedup()
     print("\n全部回归测试通过。")

@@ -42,7 +42,7 @@ from datetime import datetime
 import numpy as np
 
 from src.core.keyword_dicts import DEGREE_LEVELS
-from src.core.vector_store import get_model
+from src.core.vector_store import get_model, normalize_chunk_text
 
 DEGREE_BONUS_WEIGHT = 0.2
 TECH_OVERLAP_BONUS_WEIGHT = 0.2
@@ -165,7 +165,23 @@ def score_resume_chunks_against_jd(
         })
 
     scored.sort(key=lambda c: c["score"], reverse=True)
-    return scored[:top_k]
+    return _dedupe_by_text(scored)[:top_k]
+
+
+def _dedupe_by_text(scored_chunks: list[dict]) -> list[dict]:
+    """
+    按归一化文本去重（保留先出现的，即分数更高的那条）——同一段经历/重复上传攒下的
+    相同 chunk 不该占用多个 top_k 名额，把 5 个名额里塞进 4 条一模一样的内容。
+    调用前假定 scored_chunks 已按 score 降序。
+    """
+    out, seen = [], set()
+    for c in scored_chunks:
+        key = normalize_chunk_text(c["text"])
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
 
 
 def compute_fit_score(
