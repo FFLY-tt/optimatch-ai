@@ -362,6 +362,107 @@ def _is_extract_error(text: str) -> bool:
     return any(marker.lower() in low for marker in _EXTRACT_ERROR_MARKERS)
 
 
+# 正文其实是给非 JS 客户端的桩/占位（最典型：Workday 详情页对非浏览器返回
+# {"widget":"redirect","url":...,"externalSpa":true}），当成"没有正文"处理，需要重新抓。
+_JUNK_CONTENT_RE = re.compile(r'^\s*\{"widget"\s*:\s*"[^"]*"', re.IGNORECASE)
+
+
+def _looks_like_junk_content(content: str) -> bool:
+    if not content:
+        return True
+    return bool(_JUNK_CONTENT_RE.match(content.strip()))
+
+
+def _workday_cxs_url(url: str) -> str | None:
+    """
+    把 Workday 友好详情页 URL 转成对应的 CXS JSON API 地址。拼不出来返回 None。
+
+        friendly: https://<tenant>.<wdN>.myworkdayjobs.com/<lang?>/<site>/job/<job-path>
+        cxs     : https://<tenant>.<wdN>.myworkdayjobs.com/wday/cxs/<tenant>/<site>/job/<job-path>
+
+    - tenant：域名第一段（<tenant>.wdN.myworkdayjobs.com）
+    - site：路径里 "job" 段前面那一段（跳过可选的语言码）
+    - job-path："job" 段之后的全部路径
+    """
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return None
+    host = parts.netloc.lower()
+    if not host.endswith("myworkdayjobs.com"):
+        return None
+    if "/wday/cxs/" in parts.path:          # 已经是 CXS 地址
+        return f"https://{host}{parts.path}"
+
+    segs = [s for s in parts.path.split("/") if s]
+    if "job" not in segs:
+        return None
+    ji = segs.index("job")
+    if ji < 1:
+        return None
+    site = segs[ji - 1]
+    job_segs = segs[ji + 1:]
+    # 友好 URL 常带 /apply、/apply/applyManually 这类动作后缀，CXS 的 job 路径不要这些
+    while job_segs and job_segs[-1].lower() in ("apply", "applymanually", "autofillwithresume", "login"):
+        job_segs = job_segs[:-1]
+    job_path = "/".join(job_segs)
+    if not job_path:
+        return None
+
+    tenant = host.split(".")[0]
+    if not tenant or re.fullmatch(r"wd\d+", tenant):
+        # 老式 wdN.myworkdayjobs.com/<tenant>/... 结构：tenant 在路径第一段
+        tenant = segs[0] if segs else ""
+    if not tenant:
+        return None
+    return f"https://{host}/wday/cxs/{tenant}/{site}/job/{job_path}"
+
+
+def _fetch_workday_job(url: str, timeout: int = 15) -> str:
+    """
+    Workday 详情页正文改走 Workday 公开的 CXS JSON API（不需要无头浏览器）：
+    取 jobPostingInfo.jobDescription（HTML）转纯文本，拼上标题/地点/发布时间。
+    任何一步失败返回空字符串，让上层退回 AnySearch extract。
+    """
+    cxs = _workday_cxs_url(url)
+    if not cxs:
+        return ""
+    try:
+        resp = requests.get(
+            cxs,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+                # 部分 Workday 租户的 WAF 会校验 Referer / X-Requested-With
+                "Referer": url,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        info = (resp.json() or {}).get("jobPostingInfo") or {}
+    except Exception as e:
+        print(f"  [Workday CXS] 拉取失败 {cxs}: {e}")
+        return ""
+
+    desc_html = info.get("jobDescription") or ""
+    if not desc_html:
+        return ""
+    try:
+        from bs4 import BeautifulSoup
+        text = BeautifulSoup(desc_html, "html.parser").get_text(separator="\n")
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", desc_html)
+    body = "\n".join(ln.strip() for ln in text.splitlines() if ln.strip())
+
+    head = " | ".join(
+        str(x) for x in (info.get("title"), info.get("location"),
+                         (info.get("startDate") or info.get("postedOn"))) if x
+    )
+    return (f"{head}\n\n{body}".strip() if head else body)
+
+
 def _extract_content(url: str, timeout: int = 20) -> str:
     """
     调用 AnySearch 的 extract 工具，抓取单个 URL 的正文（返回 Markdown）。
@@ -372,6 +473,13 @@ def _extract_content(url: str, timeout: int = 20) -> str:
     自带的原始 content（一般是"标题+URL"这种稀薄内容），至少不会把错误信息
     伪装成正文塞给下游 LLM。
     """
+    # Workday 详情页：AnySearch extract 只能拿到 {"widget":"redirect"} 重定向桩，
+    # 直接走 Workday 的 CXS JSON API 拿结构化正文；拿不到再退回下面的通用 extract。
+    if "myworkdayjobs.com" in url.lower():
+        workday_text = _fetch_workday_job(url)
+        if workday_text:
+            return workday_text
+
     try:
         result = _call_tool("extract", {"url": url}, timeout=timeout)
     except Exception as e:
@@ -480,7 +588,10 @@ def search(
     if extract_content and parsed_items:
         urls_to_extract = {
             item["url"] for item in parsed_items
-            if item.get("url") and len(item.get("content") or "") < min_content_chars_before_extract
+            if item.get("url") and (
+                len(item.get("content") or "") < min_content_chars_before_extract
+                or _looks_like_junk_content(item.get("content") or "")  # Workday 重定向桩这类
+            )
         }
         if urls_to_extract:
             with ThreadPoolExecutor(max_workers=min(5, len(urls_to_extract))) as pool:
@@ -496,7 +607,12 @@ def search(
                     item["content"] = extracted
 
     for item in parsed_items:
-        item["content"] = (item.get("content") or "")[:max_content_chars]
+        content = item.get("content") or ""
+        # 补抓之后还是重定向桩/占位（Workday CXS 也没拼出来的少数情况）——直接清空，
+        # 别把 {"widget":"redirect"...} 这种当正文塞给下游 LLM / fit_score。
+        if _looks_like_junk_content(content):
+            content = ""
+        item["content"] = content[:max_content_chars]
 
     records = []
     for item in parsed_items:

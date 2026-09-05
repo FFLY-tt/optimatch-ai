@@ -345,6 +345,66 @@ def test_job_relevance_filter_rejects_marketing_pages():
     print("[PASS] test_job_relevance_filter_rejects_marketing_pages")
 
 
+# 实测坐实过一次真实 bug：AnySearch 的 extract 抓 Workday（myworkdayjobs.com）详情页，
+# 拿回来的是给非 JS 客户端的重定向桩 {"widget":"redirect","url":...,"externalSpa":true}，
+# 不是职位正文——这些职位的 fit_score 偏低、"用这条生成简历"拿不到料。修复：Workday
+# 详情页改走它公开的 CXS JSON API（不需要无头浏览器），取 jobPostingInfo.jobDescription。
+def test_workday_cxs_url_transform():
+    """
+    离线钉住 URL 转换逻辑：友好详情页 URL -> CXS JSON API 地址。
+    """
+    from src.connectors.anysearch_connector import _workday_cxs_url, _looks_like_junk_content
+
+    assert _workday_cxs_url(
+        "https://workday.wd5.myworkdayjobs.com/en-US/Workday/job/Canada-BC-Vancouver/AI-Engineer_JR-0109305"
+    ) == "https://workday.wd5.myworkdayjobs.com/wday/cxs/workday/Workday/job/Canada-BC-Vancouver/AI-Engineer_JR-0109305"
+
+    # 没有语言码段的变体
+    assert _workday_cxs_url(
+        "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite/job/US-CA-Santa-Clara/Senior-Engineer_JR1234"
+    ) == "https://nvidia.wd5.myworkdayjobs.com/wday/cxs/nvidia/NVIDIAExternalCareerSite/job/US-CA-Santa-Clara/Senior-Engineer_JR1234"
+
+    # 已经是 CXS 地址：原样返回（幂等）
+    cxs = "https://x.wd1.myworkdayjobs.com/wday/cxs/x/Careers/job/Remote/Dev_JR1"
+    assert _workday_cxs_url(cxs) == cxs
+
+    # 非 Workday / 拼不出来：返回 None，让上层退回 AnySearch extract
+    assert _workday_cxs_url("https://boards.greenhouse.io/acme/jobs/123") is None
+    assert _workday_cxs_url("https://acme.wd5.myworkdayjobs.com/en-US/Careers") is None  # 没有 job 段
+
+    # 重定向桩识别
+    assert _looks_like_junk_content('{"widget":"redirect","url":"/x","externalSpa":true}')
+    assert _looks_like_junk_content("")
+    assert not _looks_like_junk_content("We are hiring a Senior Engineer. Responsibilities: ...")
+
+    print("[PASS] test_workday_cxs_url_transform")
+
+
+def test_workday_job_content_via_cxs_api():
+    """
+    需要网络（打 myworkdayjobs.com 的 CXS API）。连不上就 SKIP，不 fail 套件。
+    验证 Workday 详情页现在能拿到真实 JD 正文，不再是 {"widget":"redirect"} 桩。
+    """
+    from src.connectors.anysearch_connector import _fetch_workday_job, _looks_like_junk_content
+
+    url = ("https://workday.wd5.myworkdayjobs.com/en-US/Workday/job/"
+           "Canada-BC-Vancouver/AI-Engineer_JR-0109305")
+    try:
+        text = _fetch_workday_job(url)
+    except (ConnectionError, TimeoutError, OSError) as e:
+        print(f"[SKIP] test_workday_job_content_via_cxs_api（网络不通：{e}）")
+        return
+
+    if not text:
+        # CXS API 可能下线了这条职位（职位会过期）——不算回归，SKIP
+        print("[SKIP] test_workday_job_content_via_cxs_api（CXS 未返回正文，职位可能已过期）")
+        return
+
+    assert not _looks_like_junk_content(text), f"还是重定向桩：{text[:120]!r}"
+    assert len(text) > 500, f"正文太短，可能没抓到完整 JD：{len(text)} 字符"
+    print(f"[PASS] test_workday_job_content_via_cxs_api（拿到 {len(text)} 字符 JD 正文）")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -354,4 +414,6 @@ if __name__ == "__main__":
     test_entry_title_and_date_on_separate_lines_keep_all_tags()
     test_anysearch_job_listing_pages_are_detected()
     test_job_relevance_filter_rejects_marketing_pages()
+    test_workday_cxs_url_transform()
+    test_workday_job_content_via_cxs_api()
     print("\n全部回归测试通过。")
