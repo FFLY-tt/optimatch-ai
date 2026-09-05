@@ -66,6 +66,17 @@ _URL_PATTERN = re.compile(r"https?://\S+")
 # 所以 platform_type == "job" 时，把明显是列表页的结果直接过滤掉。
 # ============================================================================
 
+# 常见 ATS / 招聘系统域名。search_agent 规划宽泛职位查询时，会额外拼几条
+# `site:<domain> <角色> <地区>` 的限定查询来锁定这些站点——宽泛职位 query
+# 光靠通用网页搜索基本只出聚合页（已被 looks_like_job_listing_page 过滤掉）。
+# 跟下面 _JOB_DETAIL_URL_RE 的详情页白名单同源，两边保持一致。
+ATS_JOB_SITE_DOMAINS = (
+    "greenhouse.io",          # boards.greenhouse.io / job-boards.greenhouse.io
+    "jobs.lever.co",
+    "jobs.ashbyhq.com",
+    "myworkdayjobs.com",
+)
+
 # 明确是"单条职位详情"的 URL 形态——命中就直接放行，不再做列表页判断，
 # 避免把 boards.greenhouse.io/acme/jobs/123456 这种真实详情页误杀。
 _JOB_DETAIL_URL_RE = re.compile(

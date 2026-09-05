@@ -298,6 +298,53 @@ def test_anysearch_job_listing_pages_are_detected():
     print("[PASS] test_anysearch_job_listing_pages_are_detected")
 
 
+# looks_like_job_listing_page 只能靠 URL/标题挡"列表页"，挡不住"单页但内容不是职位本身"
+# 的营销软文（"Where to Hire Python Developers in 2026"、"24 Python Developers for Hire -
+# Lemon.io" 这种招聘外包/榜单页）。search_agent._is_real_job_posting 用一次便宜的 LLM
+# 判断补上这层。这个断言要真发 LLM 请求（判断题没法纯离线测），没有 DEEPSEEK_API_KEY
+# 或网络不通就打印 SKIP、不 fail 整个套件。
+def test_job_relevance_filter_rejects_marketing_pages():
+    import os
+
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        print("[SKIP] test_job_relevance_filter_rejects_marketing_pages（没有 DEEPSEEK_API_KEY）")
+        return
+
+    from src.core.search_agent import _is_real_job_posting
+
+    reject = [
+        ("Where to Hire Python Developers in 2026 | LATAMHire",
+         "https://lathire.com/where-to-hire-python-developers/",
+         "Looking to hire Python developers? This guide compares Latin America vs Eastern Europe "
+         "rates, how to vet candidates, and the top staffing platforms."),
+        ("24 Hand-Picked Python Developers for Hire in 24 Hours - Lemon.io",
+         "https://lemon.io/hire/python-developers/",
+         "Hire vetted Python developers. Lemon.io matches you with pre-screened senior engineers "
+         "in 48 hours. Book a call today."),
+    ]
+    keep = [
+        ("Machine Learning Engineer, Search Quality",
+         "https://job-boards.greenhouse.io/gleanwork/jobs/4006735005",
+         "Glean is hiring a Machine Learning Engineer on the Search Quality team. You will design "
+         "and ship ranking models. Requirements: 5+ years ML experience, Python. Apply now."),
+        ("[Hiring] Senior Backend Engineer (Python/Go), remote",
+         "https://www.reddit.com/r/forhire/comments/abc123/hiring_senior_backend_engineer/",
+         "Our fintech startup is hiring a senior backend engineer. Stack: Python, Go, Postgres, "
+         "AWS. Full remote, USD 140-170k. Apply via the link."),
+    ]
+
+    try:
+        for t, u, c in reject:
+            assert not _is_real_job_posting(t, u, c), f"营销软文没被判成非职位：{t!r}"
+        for t, u, c in keep:
+            assert _is_real_job_posting(t, u, c), f"真实单条职位被误判成非职位：{t!r}"
+    except (ConnectionError, TimeoutError, OSError) as e:
+        print(f"[SKIP] test_job_relevance_filter_rejects_marketing_pages（网络不通：{e}）")
+        return
+
+    print("[PASS] test_job_relevance_filter_rejects_marketing_pages")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -306,4 +353,5 @@ if __name__ == "__main__":
     test_resume_with_mixed_heading_level_entries_still_produces_chunks()
     test_entry_title_and_date_on_separate_lines_keep_all_tags()
     test_anysearch_job_listing_pages_are_detected()
+    test_job_relevance_filter_rejects_marketing_pages()
     print("\n全部回归测试通过。")

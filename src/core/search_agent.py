@@ -33,9 +33,13 @@
 """
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.core.llm_client import chat, FILTER_MODEL
-from src.connectors.anysearch_connector import search as web_search
+from src.connectors.anysearch_connector import (
+    search as web_search,
+    ATS_JOB_SITE_DOMAINS,
+)
 # 原来接的是 Tavily（src.connectors.tavily_connector），现在换成 AnySearch 试一下，
 # 想切回去就把上面这行改回:
 # from src.connectors.tavily_connector import search as web_search
@@ -174,6 +178,92 @@ def _is_real_lead(title: str, content: str) -> bool:
     return "is_lead: yes" in response.lower()
 
 
+# ---------- 职位链路专用：内容相关性过滤 ----------
+IS_REAL_JOB_POSTING_SYSTEM_PROMPT = """You are filtering web search results down to genuine, \
+applyable job postings.
+
+A GENUINE JOB POSTING is a page for ONE specific open role at ONE specific employer that a \
+candidate could actually apply to right now — an ATS posting (Greenhouse/Lever/Ashby/Workday), \
+a company careers page for a single role, or a "we're hiring: <role>" post on a forum / Reddit / \
+Hacker News.
+
+NOT a genuine job posting — reject these even if they are about jobs or hiring:
+- Job-board or aggregator home / category / search-result pages (many different roles listed)
+- Career-advice / "how to get hired" / "how to become a X" guides and articles
+- "Best X to hire" / "top N developers for hire" listicles and marketing pages
+- Recruiting-agency, staffing-firm, or talent-marketplace landing pages ("hire vetted X in 48h")
+- Salary reports, compensation guides, market-trend articles, company-review pages
+
+When it is plausibly a single concrete role you could apply to, keep it (answer Yes).
+
+Given a title, URL, and content snippet, respond in this exact format:
+IS_JOB: Yes/No
+REASON: <one short phrase>
+"""
+
+
+def _is_real_job_posting(title: str, url: str, content: str) -> bool:
+    """
+    逐条判断：这是不是一条真实的、可投递的"单一职位招聘信息"，而不是职位板首页 /
+    招聘攻略 / "最值得雇的 N 个开发者" 榜单软文 / 招聘外包公司落地页。
+    looks_like_job_listing_page 只能靠 URL/标题挡"列表页"，挡不住单页软文——这一层补上。
+    """
+    prompt = f"Title: {title}\nURL: {url}\nContent snippet: {content[:400]}"
+    response = chat(prompt, system=IS_REAL_JOB_POSTING_SYSTEM_PROMPT, model=FILTER_MODEL, temperature=0)
+    return "is_job: yes" in response.lower()
+
+
+def _filter_real_job_postings(
+    records: list[UnifiedRecord], verdict_cache: dict[str, bool]
+) -> list[UnifiedRecord]:
+    """
+    对一批（AnySearch 来的）职位候选逐条跑 _is_real_job_posting，剔除软文/榜单/职位板首页。
+    verdict_cache 按 url 记结果，跨轮次复用，避免同一条重复调 LLM。
+    单条判断异常时保守保留（宁可放过一条软文，也不误杀真实职位）。
+    """
+    to_check = [r for r in records if r.url and r.url not in verdict_cache]
+    if to_check:
+        with ThreadPoolExecutor(max_workers=min(6, len(to_check))) as pool:
+            future_to_rec = {
+                pool.submit(_is_real_job_posting, r.title, r.url, r.content): r for r in to_check
+            }
+            for future in as_completed(future_to_rec):
+                r = future_to_rec[future]
+                try:
+                    verdict_cache[r.url] = future.result()
+                except Exception as e:
+                    print(f"  [调试] 职位相关性判断失败，保守保留：{r.title!r}（{e}）")
+                    verdict_cache[r.url] = True
+
+    kept = [r for r in records if verdict_cache.get(r.url, True)]
+    dropped = [r for r in records if not verdict_cache.get(r.url, True)]
+    if dropped:
+        print(
+            f"  [调试] 职位相关性过滤：剔除 {len(dropped)} 条非单一职位招聘"
+            f"（软文/榜单/职位板首页等）："
+            + "; ".join(f"{d.title!r} <{d.url}>" for d in dropped)
+        )
+    return kept
+
+
+# "Find job openings for AI Engineer in Canada Remote" 这种行话前缀，拼 site: 查询前先剥掉，
+# 只留 "AI Engineer in Canada Remote" 当关键词。
+_JOB_NEED_PREFIX_RE = re.compile(
+    r"^\s*(find|search for|looking for|help me find)\s+"
+    r"(job openings?|jobs?|roles?|positions?|openings?|work)?\s*(for|:)?\s*",
+    re.IGNORECASE,
+)
+
+
+def _ats_scoped_queries(user_need: str) -> list[str]:
+    """
+    在宽泛职位查询之外，额外拼几条 `site:<ATS域名> <角色> <地区>` 的限定查询，
+    锁定 Greenhouse/Lever/Ashby/Workday 这些真正挂单条职位详情页的站点。
+    """
+    core = _JOB_NEED_PREFIX_RE.sub("", user_need).strip() or user_need
+    return [f"site:{domain} {core}" for domain in ATS_JOB_SITE_DOMAINS]
+
+
 def filter_real_leads(records: list[UnifiedRecord]) -> list[UnifiedRecord]:
     """
     对一批搜索结果做过滤，只保留真实线索，剔除教程/资讯/百科这类参考资料。
@@ -280,6 +370,8 @@ def run_search_agent(
     """
     all_records: dict[str, UnifiedRecord] = {}  # 用 url 做 key 去重
     tried_queries: set[str] = set()
+    is_job_search = platform_type == "job"
+    job_verdict_cache: dict[str, bool] = {}  # url -> 是否真实单条职位（跨轮复用，别重复问 LLM）
 
     round_num = 0
     while round_num < max_rounds:
@@ -287,6 +379,9 @@ def run_search_agent(
         print(f"  [调试] 第 {round_num} 轮搜索开始")
 
         queries = plan_search_queries(user_need, context)
+        if is_job_search:
+            # 宽泛职位 query 光靠通用搜索基本只出聚合页，额外拼几条 site:<ATS域名> 限定查询
+            queries = queries + _ats_scoped_queries(user_need)
         new_queries = [q for q in queries if q not in tried_queries]
         if not new_queries:
             print("  [调试] 没有新的查询角度了，停止搜索")
@@ -304,13 +399,19 @@ def run_search_agent(
                 print(f"  [调试] 查询 '{q}' 搜索失败: {e}")
 
         current_records = list(all_records.values())
+        if is_job_search:
+            # 逐条内容相关性过滤（软文/榜单/职位板首页），再交给 _evaluate_results 判"够不够"
+            current_records = _filter_real_job_postings(current_records, job_verdict_cache)
         sufficient, reason = _evaluate_results(user_need, current_records)
         print(f"  [调试] 当前共 {len(current_records)} 条结果，是否足够: {sufficient}（{reason}）")
 
         if sufficient:
             break
 
-    return list(all_records.values())
+    final_records = list(all_records.values())
+    if is_job_search:
+        final_records = _filter_real_job_postings(final_records, job_verdict_cache)
+    return final_records
 
 
 def suggest_relevant_categories(
