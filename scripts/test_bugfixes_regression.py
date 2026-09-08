@@ -739,6 +739,98 @@ def test_mismatched_job_flagged_weak_but_not_fabricated():
     print("[PASS] test_mismatched_job_flagged_weak_but_not_fabricated")
 
 
+# 排查发现：搜索链路只在拼查询关键词时带了地点词，结果侧从来没有校验过"这条职位的
+# 地点/签证要求是否符合偏好"。新增 job_pref_filter.check_job 做基本规则判断。
+def test_location_visa_filter():
+    from src.tab_b_jobsearch.job_pref_filter import build_prefs, check_job
+
+    prefs = build_prefs(target_region="Canada Remote", needs_sponsorship=True)
+    assert prefs.allowed_regions == ["canada"] and prefs.open_to_remote and prefs.needs_sponsorship
+
+    # 明确排斥性签证表述 -> 剔除
+    for content in (
+        "Exciting role. Unfortunately we are not able to provide visa sponsorship at this time.",
+        "You must already be legally authorized to work in the United States. No C2C, W2 only.",
+        "US citizens only due to federal contract requirements.",
+    ):
+        keep, reason = check_job("Senior Engineer", content, "", None, prefs)
+        assert not keep, f"没被签证过滤剔除：{content!r}"
+
+    # 地点在别的国家、又不是远程 -> 剔除
+    keep, reason = check_job("Backend Engineer", "Join us onsite in our Berlin office. Hybrid 3 days.",
+                             "Berlin, Germany", False, prefs)
+    assert not keep and "地点" in reason
+
+    # 远程 / 在偏好地区 / 判不准 -> 保留
+    for title, content, loc, rem in (
+        ("Data Engineer", "Fully remote. Team distributed across Canada and the US.", "Remote", True),
+        ("ML Engineer", "Based in Toronto, ON. Some hybrid flexibility.", "Toronto, ON, Canada", False),
+        ("Platform Engineer", "Generic JD about Kubernetes and Terraform, no location or visa info.", "", None),
+        ("AI Engineer", "We happily sponsor visas for the right candidate. Fully remote.", "Remote", True),
+    ):
+        keep, reason = check_job(title, content, loc, rem, prefs)
+        assert keep, f"被误杀：{title!r} -> {reason}"
+
+    # 地点不符 + 会 sponsor：地点这关照样拦（用户要 Canada/Remote，岗位在 London 坐班）
+    keep, reason = check_job("AI Engineer", "We happily sponsor visas.", "London, UK", False, prefs)
+    assert not keep and "地点" in reason
+
+    # 没配偏好（既没地区也不需要担保）-> 一律不过滤
+    empty = build_prefs(target_region="", needs_sponsorship=False)
+    assert not empty.configured
+    keep, _ = check_job("X", "onsite in Tokyo, no sponsorship", "Tokyo", False, empty)
+    assert keep
+
+    print("[PASS] test_location_visa_filter")
+
+
+def test_applied_jobs_dedup():
+    """
+    投递成功后记一笔；之后搜索结果里同一条职位（含 URL 变体 / 跨来源同公司同标题）剔除。
+    用临时文件，不碰真实 applied_jobs.json。
+    """
+    import src.core.applied_jobs_store as ajs
+
+    orig_path = ajs.APPLIED_JOBS_FILE
+    tmp = os.path.join(os.path.dirname(__file__), "..", "data", "_applied_jobs_test.json")
+    ajs.APPLIED_JOBS_FILE = tmp
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    try:
+        assert ajs.normalize_job_url("https://www.Boards.Greenhouse.io/Acme/jobs/123/?utm=x#a") \
+            == "boards.greenhouse.io/acme/jobs/123"
+
+        assert not ajs.is_applied(job_url="https://x.com/j/1")
+
+        ajs.record_applied(
+            "https://job-boards.greenhouse.io/reddit/jobs/7997866",
+            "Software Engineer, Data Movement Platform",
+            record_id="tavily_abc123",
+        )
+        ajs.record_applied("https://job-boards.greenhouse.io/reddit/jobs/7997866", "dup")  # 幂等
+        assert len(ajs.list_applied()) == 1
+
+        # 完全一样
+        assert ajs.is_applied(job_url="https://job-boards.greenhouse.io/reddit/jobs/7997866")
+        # URL 变体（协议 / www / query / 尾斜杠）
+        assert ajs.is_applied(job_url="http://www.job-boards.greenhouse.io/reddit/jobs/7997866/?ref=hn")
+        # 靠 record_id
+        assert ajs.is_applied(record_id="tavily_abc123")
+        # 换个 greenhouse 域名、URL 结构不同，但同公司同标题
+        assert ajs.is_applied(
+            job_url="https://boards.greenhouse.io/reddit/jobs/55555",
+            job_title="Software Engineer, Data Movement Platform",
+        )
+        # 完全不相关的职位不受影响
+        assert not ajs.is_applied(job_url="https://acme.io/jobs/9", job_title="Product Manager at Stripe")
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        ajs.APPLIED_JOBS_FILE = orig_path
+
+    print("[PASS] test_applied_jobs_dedup")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -756,4 +848,6 @@ if __name__ == "__main__":
     test_structural_review_catches_content_loss()
     test_tailored_resume_preserves_key_fields()
     test_mismatched_job_flagged_weak_but_not_fabricated()
+    test_location_visa_filter()
+    test_applied_jobs_dedup()
     print("\n全部回归测试通过。")

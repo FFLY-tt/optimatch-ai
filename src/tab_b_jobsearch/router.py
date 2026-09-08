@@ -17,6 +17,8 @@ from src.core.vector_store import (
 )
 from src.core.status_store import get_status
 from src.core.resume_by_job_store import set_resume_for_job
+from src.core.applied_jobs_store import is_applied
+from src.tab_b_jobsearch.job_pref_filter import build_prefs, check_job
 from src.core.resume_document_store import save_resume_markdown, load_resume_markdown
 from src.core.resume_document import parse_resume_document
 from src.core.jd_parser import parse_job_description
@@ -232,12 +234,18 @@ class JobRecord(BaseModel):
                                   # 目前只有 remoteok/remotive 会填，HN/AnySearch 留空列表
     fit_score: float | None = None   # 跟当前简历画像的匹配度原始分数，供排序用；
                                       # None 表示没法打分（没有画像 / 这条 content 为空）
-    fit_label: str | None = None     # "强匹配"/"一般匹配"/"弱匹配"，None 同上
+    fit_label: str | None = None     # "强匹配"/"一般匹配"/"弱匹配"，同上
+    location: str | None = None      # 岗位地点（remoteok/remotive 才有）
+    remote: bool | None = None       # 是否远程岗位（同上）
 
 class SearchJobsRequest(BaseModel):
     target_role: str = Field(..., description="Target job direction, e.g. 'AI Engineer'")
     target_region: str = Field(default="Canada Remote", description="Target region")
     max_results: int = Field(default=15)
+    needs_sponsorship: bool | None = Field(
+        default=None,
+        description="是否需要签证担保。不传就看 applicant_profile.json 的 work_authorization",
+    )
 
 class SearchJobsResponse(BaseModel):
     jobs: list[JobRecord]
@@ -300,8 +308,44 @@ def _round_robin_merge(source_lists: list[list[JobRecord]], limit: int) -> list[
     return result
 
 
+def _load_profile_prefs_kwargs() -> dict:
+    """从 applicant_profile.json 里读地点/工作授权/远程偏好，读不到就返回空——搜索不硬依赖投递档案。"""
+    try:
+        from src.tab_b_jobsearch.apply.profile import load_profile
+        p = load_profile()
+        return {
+            "profile_location": p.location or "",
+            "profile_work_authorization": p.work_authorization or "",
+            "profile_willing_to_remote": p.willing_to_remote,
+        }
+    except Exception:
+        return {}
+
+
+def _filter_by_prefs_and_applied(jobs: list[JobRecord], prefs) -> tuple[list[JobRecord], int, int]:
+    """剔除：已投递过的职位 + 地点/签证明确不符的职位。返回 (保留, 已投递剔除数, 偏好不符剔除数)。"""
+    kept, applied_dropped, pref_dropped = [], 0, 0
+    for j in jobs:
+        if j.status == "applied" or is_applied(job_url=j.url, job_title=j.title, record_id=j.id):
+            applied_dropped += 1
+            continue
+        ok, reason = check_job(j.title, j.content, j.location or "", j.remote, prefs)
+        if not ok:
+            pref_dropped += 1
+            print(f"  [调试] 地点/签证过滤剔除：{j.title!r} <{j.url}> —— {reason}")
+            continue
+        kept.append(j)
+    return kept, applied_dropped, pref_dropped
+
+
 @router.post("/api/search-jobs", response_model=SearchJobsResponse)
 def search_jobs(request: SearchJobsRequest):
+    prefs = build_prefs(
+        target_region=request.target_region,
+        needs_sponsorship=request.needs_sponsorship,
+        **_load_profile_prefs_kwargs(),
+    )
+
     hn_jobs: list[JobRecord] = []
     anysearch_jobs: list[JobRecord] = []
     remoteok_jobs: list[JobRecord] = []
@@ -344,7 +388,7 @@ def search_jobs(request: SearchJobsRequest):
             remoteok_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title, content=r.content,
                 url=r.url, posted_at=r.posted_at, status=get_status(record_id),
-                matched_via=r.matched_via or [],
+                matched_via=r.matched_via or [], location=r.location, remote=r.remote,
             ))
     except Exception as e:
         print(f"  [调试] RemoteOK 抓取失败: {e}")
@@ -356,10 +400,24 @@ def search_jobs(request: SearchJobsRequest):
             remotive_jobs.append(JobRecord(
                 id=record_id, source=r.source, title=r.title, content=r.content,
                 url=r.url, posted_at=r.posted_at, status=get_status(record_id),
-                matched_via=r.matched_via or [],
+                matched_via=r.matched_via or [], location=r.location, remote=r.remote,
             ))
     except Exception as e:
         print(f"  [调试] Remotive 抓取失败: {e}")
+
+    # 结果侧硬过滤：① 已投递过的职位（含跨来源同一条）不再推荐；
+    # ② 地点/签证要求跟偏好明确不符的直接剔除。
+    # 这跟"低匹配度只标注不删除"的原则不冲突——这两类不是"匹配度低"，是"根本没法投/投了也白投"。
+    _applied_total = _pref_total = 0
+    _filtered_lists = []
+    for _lst in (hn_jobs, anysearch_jobs, remoteok_jobs, remotive_jobs):
+        _kept, _a, _p = _filter_by_prefs_and_applied(_lst, prefs)
+        _filtered_lists.append(_kept)
+        _applied_total += _a
+        _pref_total += _p
+    hn_jobs, anysearch_jobs, remoteok_jobs, remotive_jobs = _filtered_lists
+    if _applied_total or _pref_total:
+        print(f"  [调试] 结果侧过滤：剔除已投递 {_applied_total} 条、地点/签证不符 {_pref_total} 条")
 
     # 产品要求：不做硬过滤（不把低匹配度的职位从列表里删掉），只排序+标注，
     # 让用户自己判断要不要点进去——跟 matched_via 那次的设计原则一致，

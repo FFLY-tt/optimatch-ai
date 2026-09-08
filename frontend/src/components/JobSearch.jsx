@@ -95,6 +95,7 @@ export default function JobSearch({ onUseForTailor }) {
   const [targetRole, setTargetRole] = useState('')
   const [targetRegion, setTargetRegion] = useState('Canada Remote')
   const [maxResults, setMaxResults] = useState(15)
+  const [needsSponsorship, setNeedsSponsorship] = useState(false)
   const [loading, setLoading] = useState(false)
   const [jobs, setJobs] = useState(null)
   const [profileScored, setProfileScored] = useState(true)
@@ -166,6 +167,7 @@ export default function JobSearch({ onUseForTailor }) {
       const draft = await startApply({
         jobId: job.id,
         jobUrl: job.url,
+        jobTitle: job.title,
         jobDescription: job.content,
       })
       setActiveApply({ job, draft })
@@ -200,6 +202,7 @@ export default function JobSearch({ onUseForTailor }) {
         targetRole,
         targetRegion,
         maxResults: Number(maxResults) || 15,
+        needsSponsorship,
       })
       setJobs(data.jobs)
       setProfileScored(data.profile_scored)
@@ -232,6 +235,14 @@ export default function JobSearch({ onUseForTailor }) {
           onChange={(e) => setMaxResults(e.target.value)}
           style={{ width: '5em' }}
         />
+        <label style={{ display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}>
+          <input
+            type="checkbox"
+            checked={needsSponsorship}
+            onChange={(e) => setNeedsSponsorship(e.target.checked)}
+          />
+          需要签证担保
+        </label>
         <button className="btn-primary" type="submit" disabled={loading || !targetRole.trim()}>
           {loading ? '搜索中...' : '搜索'}
         </button>

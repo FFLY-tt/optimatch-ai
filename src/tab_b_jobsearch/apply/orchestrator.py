@@ -101,6 +101,7 @@ def start_application(
     job_url: str,
     job_description: str = "",
     resume_path: str | None = None,
+    job_title: str = "",
 ) -> ApplyDraft:
     try:
         profile = load_profile()
@@ -157,6 +158,7 @@ def start_application(
         submit_button=submit_button,
         job_id=job_id,
         job_url=job_url,
+        job_title=job_title,
     )
     screenshot_path = os.path.join(SCREENSHOT_DIR, f"{session_id_placeholder}.png")
     try:
@@ -208,7 +210,12 @@ def confirm_submit(session_id: str) -> dict:
     finally:
         page.close()
 
-    return {"success": True, "job_id": job_id}
+    return {
+        "success": True,
+        "job_id": job_id,
+        "job_url": session.get("job_url", ""),
+        "job_title": session.get("job_title", ""),
+    }
 
 
 def cancel(session_id: str) -> dict:

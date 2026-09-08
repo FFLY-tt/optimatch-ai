@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from src.tab_b_jobsearch.apply.orchestrator import start_application, confirm_submit, cancel, ApplyError
 from src.core.status_store import update_status
 from src.core.resume_by_job_store import get_resume_for_job
+from src.core.applied_jobs_store import record_applied
 from src.connectors.anysearch_connector import looks_like_job_listing_page
 
 router = APIRouter(tags=["Tab B - Auto Apply"])
@@ -35,6 +36,7 @@ def apply_resume_for_job(job_id: str):
 class StartApplyRequest(BaseModel):
     job_id: str = Field(..., description="职位记录 id，跟 /api/search-jobs 返回的 JobRecord.id 对应")
     job_url: str
+    job_title: str = Field(default="", description="职位标题，投递成功后记进'已投递'去重记录")
     job_description: str = Field(default="", description="职位描述原文，用来给 LLM 兜底回答开放性问题做上下文")
     resume_path: str | None = Field(default=None, description="不传就用 applicant_profile.json 里配的默认简历")
 
@@ -73,6 +75,7 @@ def apply_start(request: StartApplyRequest):
             job_url=request.job_url,
             job_description=request.job_description,
             resume_path=request.resume_path,
+            job_title=request.job_title,
         )
     except ApplyError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -117,6 +120,16 @@ def apply_confirm(request: SessionIdRequest):
         update_status(result["job_id"], "applied")
     except ValueError:
         pass  # status_store 校验失败不应该让"已经提交出去的投递"报错回滚，最多状态没同步上
+
+    # 记进"已投递"去重记录：之后搜索结果里同一条职位（含跨来源）直接不再展示。
+    try:
+        record_applied(
+            job_url=result.get("job_url", ""),
+            job_title=result.get("job_title", ""),
+            record_id=result.get("job_id", ""),
+        )
+    except Exception as e:
+        print(f"  [调试] 记录已投递职位失败（不影响投递本身）: {e}")
 
     return ApplyResultResponse(success=True, message="已提交")
 

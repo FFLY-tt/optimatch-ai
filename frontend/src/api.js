@@ -59,7 +59,7 @@ export function addResumeNote(noteText) {
   })
 }
 
-export function searchJobs({ targetRole, targetRegion, maxResults }) {
+export function searchJobs({ targetRole, targetRegion, maxResults, needsSponsorship }) {
   return request('/api/search-jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -67,6 +67,7 @@ export function searchJobs({ targetRole, targetRegion, maxResults }) {
       target_role: targetRole,
       target_region: targetRegion,
       max_results: maxResults,
+      needs_sponsorship: needsSponsorship ?? null,
     }),
   })
 }
@@ -103,13 +104,14 @@ export function getResumeForJob(jobId) {
   return request(`/api/apply/resume-for-job/${encodeURIComponent(jobId)}`)
 }
 
-export function startApply({ jobId, jobUrl, jobDescription }) {
+export function startApply({ jobId, jobUrl, jobTitle, jobDescription }) {
   return request('/api/apply/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       job_id: jobId,
       job_url: jobUrl,
+      job_title: jobTitle || '',
       job_description: jobDescription || '',
     }),
   })
