@@ -928,6 +928,86 @@ def test_hn_connector_url_and_seeker_filter():
     print("[PASS] test_hn_connector_url_and_seeker_filter")
 
 
+# 实测坐实过一次真实 bug：持久化浏览器目录被弄坏之后，browser.get_context() 一直抛
+# TargetClosedError，而 start_application 里 get_context()/new_page() 不在任何 try 里、
+# apply_router 又只 catch ApplyError —— 于是裸奔成 500 "Internal Server Error"（还不是
+# JSON），前端 ErrorBanner 显示不出内容，浏览器 tab 晾成 about:blank 也没人关。
+# 修复：start_application 整体包 try/except 把任何异常都转成 ApplyError 且不漏 page；
+# apply_router 兜一层把非 ApplyError 也转成带 detail 的响应；所有浏览器操作固定在
+# 专用单线程里跑（同步 Playwright 不能跨 FastAPI 线程池的线程）。
+def test_apply_start_never_raises_bare_exception():
+    """
+    start_application 的契约：要么返回 ApplyDraft，要么抛 ApplyError —— 绝不让底层
+    异常（浏览器启动失败等）原样冒泡。用 monkeypatch 让 get_context 直接炸。
+    """
+    from src.tab_b_jobsearch.apply import orchestrator, browser
+    from src.tab_b_jobsearch.apply.orchestrator import ApplyError
+
+    orig = browser.get_context
+    browser.get_context = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("模拟浏览器启动失败"))
+    try:
+        try:
+            orchestrator.start_application(job_id="x", job_url="https://acme.com/careers/apply/1",
+                                          job_title="T", resume_path=__file__)  # 用一个真实存在的文件绕过简历检查
+        except ApplyError as e:
+            assert "模拟浏览器启动失败" in str(e), str(e)
+        except Exception as e:  # noqa: BLE001
+            raise AssertionError(f"抛的不是 ApplyError，而是 {type(e).__name__}: {e}")
+        else:
+            raise AssertionError("应该抛 ApplyError 才对")
+    finally:
+        browser.get_context = orig
+
+    print("[PASS] test_apply_start_never_raises_bare_exception")
+
+
+def test_apply_start_route_returns_json_detail_on_failure():
+    """
+    /api/apply/start 遇到任何失败都要返回带 detail 的响应（前端 ErrorBanner 能渲染），
+    不能是裸的 500 "Internal Server Error"。
+    """
+    from fastapi.testclient import TestClient
+    from src.main import app
+    from src.tab_b_jobsearch import apply_router
+
+    orig = apply_router.start_application
+    apply_router.start_application = lambda **k: (_ for _ in ()).throw(RuntimeError("boom-non-applyerror"))
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/apply/start", json={
+            "job_id": "t", "job_url": "https://acme.com/careers/apply/1", "job_title": "T",
+        })
+        assert resp.status_code in (400, 500), resp.status_code
+        body = resp.json()
+        assert isinstance(body, dict) and body.get("detail"), f"响应没有 detail 字段：{resp.text[:200]}"
+        assert "boom-non-applyerror" in body["detail"] or "启动失败" in body["detail"]
+    finally:
+        apply_router.start_application = orig
+
+    print("[PASS] test_apply_start_route_returns_json_detail_on_failure")
+
+
+def test_browser_ops_pinned_to_one_thread():
+    from src.tab_b_jobsearch.apply.browser import run_in_browser_thread
+    import threading
+
+    seen = set()
+    for _ in range(5):
+        seen.add(run_in_browser_thread(lambda: threading.current_thread().name))
+    assert len(seen) == 1, f"浏览器操作没固定在同一个线程：{seen}"
+    assert "apply-browser" in next(iter(seen))
+
+    # 异常要原样抛回来
+    try:
+        run_in_browser_thread(lambda: (_ for _ in ()).throw(ValueError("propagate me")))
+    except ValueError as e:
+        assert str(e) == "propagate me"
+    else:
+        raise AssertionError("异常没有从 run_in_browser_thread 抛回来")
+
+    print("[PASS] test_browser_ops_pinned_to_one_thread")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -949,4 +1029,7 @@ if __name__ == "__main__":
     test_applied_jobs_dedup()
     test_application_page_sanity_check()
     test_hn_connector_url_and_seeker_filter()
+    test_apply_start_never_raises_bare_exception()
+    test_apply_start_route_returns_json_detail_on_failure()
+    test_browser_ops_pinned_to_one_thread()
     print("\n全部回归测试通过。")

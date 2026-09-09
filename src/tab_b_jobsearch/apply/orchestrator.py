@@ -8,10 +8,14 @@
 """
 
 import dataclasses
+import logging
 import os
 import re
+import traceback
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
+
+log = logging.getLogger("optimatch.apply")
 
 from src.tab_b_jobsearch.apply import browser, session as session_store
 from src.tab_b_jobsearch.apply.profile import load_profile, ProfileNotConfigured
@@ -101,6 +105,13 @@ def _page_host(page) -> str:
         return ""
 
 
+def _safe_url(page) -> str:
+    try:
+        return page.url or "(空)"
+    except Exception:
+        return "(读取失败)"
+
+
 _LOGIN_PAGE_TEXT_RE = re.compile(
     r"\b(log ?in|sign ?in|sign ?up|create (an )?account|forgot (your )?password|"
     r"continue with (google|github|linkedin|apple)|welcome back)\b", re.IGNORECASE)
@@ -163,8 +174,11 @@ def _looks_like_application_page(page, scope) -> tuple[bool, str]:
     names = probe.get("nameLike", 0)
 
     host = _page_host(page)
-    # 已知 ATS 域名（只匹配 host，不匹配 query 里的 continue=… 之类）+ 页面确实有可填字段
-    if fillable >= 1 and passwords == 0 and any(h in host for h in _KNOWN_ATS_HOST_HINTS):
+    has_pii_field = files >= 1 or emails >= 1 or names >= 1
+    # 已知 ATS 域名（只匹配 host，不匹配 query 里的 continue=… 之类）+ 至少有一个
+    # 姓名/邮箱/简历上传字段。光有可填字段不够——greenhouse 的职位板首页也有
+    # "搜索/部门/办公室"这种下拉框，那不是申请表单。
+    if has_pii_field and passwords == 0 and any(h in host for h in _KNOWN_ATS_HOST_HINTS):
         return True, ""
 
     # 强负向：有密码框 = 登录/注册页，不是申请表单（除非同时有简历上传框，那才可能是内嵌登录的申请页）
@@ -231,81 +245,101 @@ def start_application(
             "或者在 applicant_profile.json 里配一个默认简历路径。文件需要真实存在于本机磁盘上。"
         )
 
-    context = browser.get_context()
-    page = context.new_page()
-
-    candidates = _candidate_adapters(job_url)
-    chosen = None
-    open_scope = None
-    messages: list[str] = []
-    for adapter in candidates:
-        try:
-            result = adapter.open_apply_flow(page, job_url)
-        except Exception as e:
-            messages.append(f"{adapter.platform_name}: 打开申请流程时出错 - {e}")
-            continue
-        if result.ok:
-            chosen = adapter
-            open_scope = result.scope
-            break
-        messages.append(f"{adapter.platform_name}: {result.message}")
-
-    if chosen is None:
-        page.close()
-        raise ApplyError("没能打开这个职位的申请表单。\n" + "\n".join(messages))
-
-    # 健全性检查：确认打开的确实是职位申请表单，不是平台通用页 / 登录页 / 空白页。
-    form_ok, form_reason = _looks_like_application_page(page, open_scope)
-    if not form_ok:
-        try:
-            page.close()
-        except Exception:
-            pass
-        raise ApplyError(
-            f"未找到申请表单，已跳过这条职位：{form_reason}。"
-            f"这条链接可能不是某个具体职位的申请页（比如是平台首页 / 登录页 / "
-            f"孵化器申请页），请点职位标题打开原链接手动确认。"
-        )
-
-    captcha_present = detect_captcha(page)
-    filled_fields = chosen.fill(open_scope, profile, job_description)
-    captcha_present = captcha_present or detect_captcha(page)
-    submit_button = chosen.locate_submit_button(page, open_scope)
-
-    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-    session_id_placeholder = session_store.create_session(
-        page=page,
-        adapter=chosen,
-        submit_button=submit_button,
-        job_id=job_id,
-        job_url=job_url,
-        job_title=job_title,
-    )
-    screenshot_path = os.path.join(SCREENSHOT_DIR, f"{session_id_placeholder}.png")
+    log.info("apply.start job_id=%s url=%s", job_id, job_url)
+    page = None
     try:
-        page.screenshot(path=screenshot_path, full_page=True)
-    except Exception:
-        screenshot_path = ""
+        context = browser.get_context()
+        page = context.new_page()
 
-    warnings = [f"「{f.label}」没能自动填上，需要你手动检查/填写" for f in filled_fields if f.source == "manual_required"]
-    if submit_button is None:
-        warnings.append("没能定位到最终的提交按钮——可能卡在中间某一步，投递前建议先手动看一眼截图/浏览器窗口。")
-    if captcha_present:
-        warnings.append(
-            "这个页面出现验证码（hCaptcha / reCAPTCHA 等），自动流程不会尝试识别或绕过验证码——"
-            "需要你自己在弹出的浏览器窗口里手动完成验证码，再手动走完剩下的提交步骤。"
+        candidates = _candidate_adapters(job_url)
+        chosen = None
+        open_scope = None
+        messages: list[str] = []
+        for adapter in candidates:
+            try:
+                result = adapter.open_apply_flow(page, job_url)
+            except Exception as e:
+                log.warning("apply.open_apply_flow adapter=%s 失败: %s", adapter.platform_name, e)
+                messages.append(f"{adapter.platform_name}: 打开申请流程时出错 - {e}")
+                continue
+            log.info("apply.open_apply_flow adapter=%s ok=%s page_url=%s",
+                     adapter.platform_name, result.ok, _safe_url(page))
+            if result.ok:
+                chosen = adapter
+                open_scope = result.scope
+                break
+            messages.append(f"{adapter.platform_name}: {result.message}")
+
+        if chosen is None:
+            raise ApplyError("没能打开这个职位的申请表单。\n" + "\n".join(messages))
+
+        # 健全性检查：确认打开的确实是职位申请表单，不是平台通用页 / 登录页 / 空白页。
+        form_ok, form_reason = _looks_like_application_page(page, open_scope)
+        log.info("apply.form_sanity ok=%s reason=%s page_url=%s", form_ok, form_reason, _safe_url(page))
+        if not form_ok:
+            raise ApplyError(
+                f"未找到申请表单，已跳过这条职位：{form_reason}。"
+                f"这条链接可能不是某个具体职位的申请页（比如是平台首页 / 登录页 / "
+                f"孵化器申请页），请点职位标题打开原链接手动确认。"
+            )
+
+        captcha_present = detect_captcha(page)
+        filled_fields = chosen.fill(open_scope, profile, job_description)
+        captcha_present = captcha_present or detect_captcha(page)
+        submit_button = chosen.locate_submit_button(page, open_scope)
+        log.info("apply.filled fields=%d captcha=%s submit_found=%s",
+                 len(filled_fields), captcha_present, submit_button is not None)
+
+        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+        session_id_placeholder = session_store.create_session(
+            page=page,
+            adapter=chosen,
+            submit_button=submit_button,
+            job_id=job_id,
+            job_url=job_url,
+            job_title=job_title,
         )
+        screenshot_path = os.path.join(SCREENSHOT_DIR, f"{session_id_placeholder}.png")
+        try:
+            page.screenshot(path=screenshot_path, full_page=True)
+        except Exception:
+            screenshot_path = ""
+        page = None  # 交给 session 托管，不在下面的 finally 里关掉
 
-    return ApplyDraft(
-        session_id=session_id_placeholder,
-        job_id=job_id,
-        job_url=job_url,
-        platform=chosen.platform_name,
-        filled_fields=filled_fields,
-        screenshot_path=screenshot_path,
-        ready_to_submit=submit_button is not None and not captcha_present,
-        warnings=warnings,
-    )
+        warnings = [f"「{f.label}」没能自动填上，需要你手动检查/填写" for f in filled_fields if f.source == "manual_required"]
+        if submit_button is None:
+            warnings.append("没能定位到最终的提交按钮——可能卡在中间某一步，投递前建议先手动看一眼截图/浏览器窗口。")
+        if captcha_present:
+            warnings.append(
+                "这个页面出现验证码（hCaptcha / reCAPTCHA 等），自动流程不会尝试识别或绕过验证码——"
+                "需要你自己在弹出的浏览器窗口里手动完成验证码，再手动走完剩下的提交步骤。"
+            )
+
+        log.info("apply.start done session=%s ready=%s warnings=%d",
+                 session_id_placeholder, submit_button is not None and not captcha_present, len(warnings))
+        return ApplyDraft(
+            session_id=session_id_placeholder,
+            job_id=job_id,
+            job_url=job_url,
+            platform=chosen.platform_name,
+            filled_fields=filled_fields,
+            screenshot_path=screenshot_path,
+            ready_to_submit=submit_button is not None and not captcha_present,
+            warnings=warnings,
+        )
+    except ApplyError:
+        raise
+    except Exception as e:
+        # 任何没预料到的错（浏览器启动失败 / 页面超时 / Playwright 跨线程 …）——
+        # 统一转成 ApplyError，绝不让原始异常冒泡成 500，也绝不留下没关的页面。
+        log.error("apply.start 未预期异常 job_id=%s url=%s:\n%s", job_id, job_url, traceback.format_exc())
+        raise ApplyError(f"自动投递启动失败：{type(e).__name__}: {e}") from e
+    finally:
+        if page is not None:
+            try:
+                page.close()
+            except Exception:
+                pass
 
 
 def confirm_submit(session_id: str) -> dict:
@@ -316,9 +350,10 @@ def confirm_submit(session_id: str) -> dict:
     page = session["page"]
     submit_button = session["submit_button"]
     job_id = session["job_id"]
+    log.info("apply.confirm session=%s job_id=%s", session_id, job_id)
 
     if submit_button is None:
-        page.close()
+        _safe_close(page)
         raise ApplyError("这个会话没有定位到可点击的提交按钮，不能提交，先取消重新走一遍。")
 
     try:
@@ -328,15 +363,28 @@ def confirm_submit(session_id: str) -> dict:
             page.wait_for_load_state("networkidle", timeout=8000)
         except Exception:
             pass
+    except ApplyError:
+        raise
+    except Exception as e:
+        log.error("apply.confirm 点击提交失败 session=%s:\n%s", session_id, traceback.format_exc())
+        raise ApplyError(f"点击提交按钮时出错：{type(e).__name__}: {e}") from e
     finally:
-        page.close()
+        _safe_close(page)
 
+    log.info("apply.confirm done session=%s", session_id)
     return {
         "success": True,
         "job_id": job_id,
         "job_url": session.get("job_url", ""),
         "job_title": session.get("job_title", ""),
     }
+
+
+def _safe_close(page) -> None:
+    try:
+        page.close()
+    except Exception:
+        pass
 
 
 def cancel(session_id: str) -> dict:

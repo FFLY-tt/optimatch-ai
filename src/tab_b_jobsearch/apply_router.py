@@ -5,19 +5,23 @@ tab_b_jobsearch/router.py，是因为那个文件已经快 500 行了，这块�
 """
 
 import dataclasses
+import logging
 import os
+import traceback
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from src.tab_b_jobsearch.apply.orchestrator import start_application, confirm_submit, cancel, ApplyError
+from src.tab_b_jobsearch.apply.browser import run_in_browser_thread
 from src.core.status_store import update_status
 from src.core.resume_by_job_store import get_resume_for_job
 from src.core.applied_jobs_store import record_applied
 from src.connectors.anysearch_connector import looks_like_job_listing_page
 
 router = APIRouter(tags=["Tab B - Auto Apply"])
+log = logging.getLogger("optimatch.apply")
 
 
 class ResumeForJobResponse(BaseModel):
@@ -70,7 +74,10 @@ def apply_start(request: StartApplyRequest):
         )
 
     try:
-        draft = start_application(
+        # 所有 Playwright 操作固定在专用浏览器线程里跑（同步 API 不能跨 FastAPI 线程池的线程用）。
+        draft = run_in_browser_thread(
+            start_application,
+            _timeout=140,   # 前端 startApply 是 150s，后端比它早一点结束，好返回一个明确的错
             job_id=request.job_id,
             job_url=request.job_url,
             job_description=request.job_description,
@@ -79,6 +86,11 @@ def apply_start(request: StartApplyRequest):
         )
     except ApplyError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # start_application 已经把内部异常都转成 ApplyError 了；能走到这里的基本是
+        # run_in_browser_thread 本身出问题。仍然返回带 detail 的 JSON，绝不裸奔成 500。
+        log.error("apply.start 路由层未预期异常:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"自动投递启动失败：{type(e).__name__}: {e}")
 
     screenshot_url = f"/api/apply/screenshot/{draft.session_id}" if draft.screenshot_path else None
     return StartApplyResponse(
@@ -112,9 +124,12 @@ class ApplyResultResponse(BaseModel):
 @router.post("/api/apply/confirm", response_model=ApplyResultResponse)
 def apply_confirm(request: SessionIdRequest):
     try:
-        result = confirm_submit(request.session_id)
+        result = run_in_browser_thread(confirm_submit, request.session_id, _timeout=55)
     except ApplyError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.error("apply.confirm 路由层未预期异常:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"提交时出错：{type(e).__name__}: {e}")
 
     try:
         update_status(result["job_id"], "applied")
@@ -136,5 +151,8 @@ def apply_confirm(request: SessionIdRequest):
 
 @router.post("/api/apply/cancel", response_model=ApplyResultResponse)
 def apply_cancel(request: SessionIdRequest):
-    cancel(request.session_id)
+    try:
+        run_in_browser_thread(cancel, request.session_id, _timeout=30)
+    except Exception as e:
+        log.warning("apply.cancel 出错（会话可能已失效，忽略）: %s", e)
     return ApplyResultResponse(success=True, message="已取消，没有提交任何内容")

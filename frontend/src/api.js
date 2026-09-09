@@ -19,14 +19,29 @@ export class NetworkError extends Error {
 }
 
 async function request(path, options = {}) {
+  const { timeoutMs, ...fetchOptions } = options
   let res
+  let timer
   try {
-    res = await fetch(path, options)
+    if (timeoutMs) {
+      const ctrl = new AbortController()
+      timer = setTimeout(() => ctrl.abort(), timeoutMs)
+      fetchOptions.signal = ctrl.signal
+    }
+    res = await fetch(path, fetchOptions)
   } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new NetworkError(
+        `请求超时（超过 ${Math.round(timeoutMs / 1000)} 秒没有响应）。` +
+        `如果是自动投递，请看一眼弹出的浏览器窗口目前是什么状态，或检查后端日志。`
+      )
+    }
     // fetch 本身抛异常，说明请求根本没打到后端（后端没起、断网这类）
     throw new NetworkError(
       `网络请求失败，请确认后端服务（uvicorn）是否已启动：${err.message}`
     )
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 
   let data = null
@@ -114,6 +129,7 @@ export function startApply({ jobId, jobUrl, jobTitle, jobDescription }) {
       job_title: jobTitle || '',
       job_description: jobDescription || '',
     }),
+    timeoutMs: 150000, // 打开浏览器 + 填表最坏情况一分多钟；超过就当卡住了，别让前端无限转
   })
 }
 
@@ -122,6 +138,7 @@ export function confirmApply(sessionId) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: sessionId }),
+    timeoutMs: 60000,
   })
 }
 

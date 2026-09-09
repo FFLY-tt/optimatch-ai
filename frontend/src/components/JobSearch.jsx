@@ -172,6 +172,9 @@ export default function JobSearch({ onUseForTailor }) {
       })
       setActiveApply({ job, draft })
     } catch (err) {
+      // 报错直接显示在这条职位卡片上（用户点的是这张卡，别让提示只出现在页面顶部看不到）
+      const msg = err.detail || err.message || '自动投递失败'
+      setApplyNotices((prev) => ({ ...prev, [job.id]: `❌ ${msg}` }))
       setApplyError(err)
     } finally {
       setApplyLoadingIds((prev) => {
