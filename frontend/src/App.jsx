@@ -2,6 +2,7 @@ import { useState, useRef } from 'react'
 import ResumeBuilder from './components/ResumeBuilder'
 import JobSearch from './components/JobSearch'
 import TailorResume from './components/TailorResume'
+import ApplyDashboard from './components/ApplyDashboard'
 import './App.css'
 
 export default function App() {
@@ -59,6 +60,17 @@ export default function App() {
               onJobDescriptionChange={setJobDescription}
               jobId={jobId}
             />
+          </div>
+        </section>
+
+        <section className="stage" data-accent="sky">
+          <div className="stage__badge">04</div>
+          <div className="stage__header">
+            <h2 className="stage__title">投递看板</h2>
+            <p className="stage__subtitle">STAGE_04 · APPLY_DASHBOARD</p>
+          </div>
+          <div className="stage__card">
+            <ApplyDashboard />
           </div>
         </section>
       </div>

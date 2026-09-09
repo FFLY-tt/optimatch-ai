@@ -15,9 +15,9 @@ from pydantic import BaseModel, Field
 
 from src.tab_b_jobsearch.apply.orchestrator import start_application, confirm_submit, cancel, ApplyError
 from src.tab_b_jobsearch.apply.browser import run_in_browser_thread
-from src.core.status_store import update_status
 from src.core.resume_by_job_store import get_resume_for_job
 from src.core.applied_jobs_store import record_applied
+from src.core import apply_dashboard
 from src.connectors.anysearch_connector import looks_like_job_listing_page
 
 router = APIRouter(tags=["Tab B - Auto Apply"])
@@ -92,6 +92,17 @@ def apply_start(request: StartApplyRequest):
         log.error("apply.start 路由层未预期异常:\n%s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"自动投递启动失败：{type(e).__name__}: {e}")
 
+    # 表单打开了但卡住了（验证码 / 找不到提交按钮）——标成"需人工处理"，进看板等用户收尾。
+    if not draft.ready_to_submit:
+        blocker = "验证码" if any("验证码" in w for w in draft.warnings) else "没找到可点击的提交按钮"
+        try:
+            apply_dashboard.mark_needs_user(
+                request.job_id, reason=blocker,
+                job_url=request.job_url, job_title=request.job_title,
+            )
+        except Exception as e:
+            log.warning("mark_needs_user 失败: %s", e)
+
     screenshot_url = f"/api/apply/screenshot/{draft.session_id}" if draft.screenshot_path else None
     return StartApplyResponse(
         session_id=draft.session_id,
@@ -131,10 +142,23 @@ def apply_confirm(request: SessionIdRequest):
         log.error("apply.confirm 路由层未预期异常:\n%s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"提交时出错：{type(e).__name__}: {e}")
 
+    # 根据 confirm_submit 抓到的信号定状态：
+    #   outcome == "confirmed" -> applied_confirmed（拿到了感谢页 / 确认文案 / application id）
+    #   否则                    -> submitted_unverified（点击成功但没确认信号，多数 ATS 属于这类）
+    outcome = result.get("outcome", "submitted")
+    reason = result.get("outcome_reason", "")
     try:
-        update_status(result["job_id"], "applied")
-    except ValueError:
-        pass  # status_store 校验失败不应该让"已经提交出去的投递"报错回滚，最多状态没同步上
+        if outcome == "confirmed":
+            apply_dashboard.mark_confirmed(result["job_id"], reason,
+                                          result.get("job_url", ""), result.get("job_title", ""))
+            msg = "已确认投递（页面出现了确认信息）"
+        else:
+            apply_dashboard.mark_submitted(result["job_id"], reason,
+                                           result.get("job_url", ""), result.get("job_title", ""))
+            msg = "表单已提交，但没抓到对方系统的确认信息——请自己确认一下（收到确认邮件后可在投递看板里标为已确认）"
+    except Exception as e:
+        log.warning("写投递状态失败: %s", e)
+        msg = "已提交"
 
     # 记进"已投递"去重记录：之后搜索结果里同一条职位（含跨来源）直接不再展示。
     try:
@@ -146,7 +170,7 @@ def apply_confirm(request: SessionIdRequest):
     except Exception as e:
         print(f"  [调试] 记录已投递职位失败（不影响投递本身）: {e}")
 
-    return ApplyResultResponse(success=True, message="已提交")
+    return ApplyResultResponse(success=True, message=msg)
 
 
 @router.post("/api/apply/cancel", response_model=ApplyResultResponse)
@@ -156,3 +180,51 @@ def apply_cancel(request: SessionIdRequest):
     except Exception as e:
         log.warning("apply.cancel 出错（会话可能已失效，忽略）: %s", e)
     return ApplyResultResponse(success=True, message="已取消，没有提交任何内容")
+
+
+# ---------- 投递看板（只读 + 手动收尾） ----------
+class DashboardRow(BaseModel):
+    record_id: str
+    status: str
+    status_label: str
+    status_reason: str = ""
+    updated_at: str = ""
+    title: str = ""
+    company: str = ""
+    url: str = ""
+    source: str = ""
+    fit_score: float | None = None
+    fit_label: str = ""
+    relevance_label: str = ""
+    first_seen: str = ""
+    applied_at: str = ""
+
+
+class DashboardResponse(BaseModel):
+    queue: list[DashboardRow]
+    applications: list[DashboardRow]
+
+
+@router.get("/api/apply/dashboard", response_model=DashboardResponse)
+def apply_dashboard_view():
+    """Queue（待处理）+ Applications（历史）两个视图的只读数据。刷新页面即拿最新状态。"""
+    return DashboardResponse(
+        queue=apply_dashboard.queue_view(),
+        applications=apply_dashboard.applications_view(),
+    )
+
+
+class MarkConfirmedRequest(BaseModel):
+    record_id: str
+
+
+@router.post("/api/apply/mark-confirmed", response_model=ApplyResultResponse)
+def apply_mark_confirmed(request: MarkConfirmedRequest):
+    """
+    手动收尾：把一条"已提交·待确认"（或 needs_user / 旧 applied）标成"已确认投递"。
+    用于自动流程抓不到确认信号、但用户收到了确认邮件的情况。
+    """
+    ok = apply_dashboard.mark_confirmed_by_id(request.record_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail="这条记录当前状态不支持手动标为已确认。")
+    return ApplyResultResponse(success=True, message="已标记为「已确认投递」")

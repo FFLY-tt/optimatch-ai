@@ -1008,6 +1008,170 @@ def test_browser_ops_pinned_to_one_thread():
     print("[PASS] test_browser_ops_pinned_to_one_thread")
 
 
+# ---- 投递状态细化 + 看板 ----
+import contextlib
+import json as _json
+import tempfile
+
+
+@contextlib.contextmanager
+def _isolated_stores():
+    """把 status_store / job_queue / applied_jobs 三个 JSON 都指到临时目录，测完还原。"""
+    from src.core import status_store, apply_dashboard, applied_jobs_store
+    d = tempfile.mkdtemp()
+    saved = (status_store.STATUS_FILE, apply_dashboard.QUEUE_FILE, applied_jobs_store.APPLIED_JOBS_FILE)
+    status_store.STATUS_FILE = os.path.join(d, "status_store.json")
+    apply_dashboard.QUEUE_FILE = os.path.join(d, "job_queue.json")
+    applied_jobs_store.APPLIED_JOBS_FILE = os.path.join(d, "applied_jobs.json")
+    try:
+        yield d
+    finally:
+        (status_store.STATUS_FILE, apply_dashboard.QUEUE_FILE, applied_jobs_store.APPLIED_JOBS_FILE) = saved
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_status_store_backward_compat():
+    from src.core import status_store
+    with _isolated_stores():
+        # 老格式：纯字符串
+        with open(status_store.STATUS_FILE, "w") as f:
+            _json.dump({"r1": "applied", "r2": "new"}, f)
+        assert status_store.get_status("r1") == "applied"
+        assert status_store.get_record("r2") == {"status": "new", "reason": "", "updated_at": ""}
+        # 新写入是 dict 格式，带 reason / updated_at
+        status_store.update_status("r3", status_store.STATUS_SUBMITTED_UNVERIFIED, reason="click_only")
+        rec = status_store.get_record("r3")
+        assert rec["status"] == "submitted_unverified" and rec["reason"] == "click_only" and rec["updated_at"]
+        # 非法状态拦下来
+        try:
+            status_store.update_status("r4", "banana")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("非法状态没被拦")
+    print("[PASS] test_status_store_backward_compat")
+
+
+def test_apply_dashboard_queue_and_transitions():
+    from src.core import apply_dashboard, status_store
+    with _isolated_stores():
+        n = apply_dashboard.queue_jobs([
+            {"id": "strong", "title": "AI Eng at Reddit", "url": "https://job-boards.greenhouse.io/reddit/jobs/1",
+             "source": "anysearch", "fit_score": 0.61, "fit_label": "强匹配"},
+            {"id": "weak", "title": "X", "url": "https://a.com/1", "source": "hn", "fit_score": 0.2, "fit_label": "弱匹配"},
+            {"id": "none", "title": "Y", "url": "https://b.com/1", "source": "hn", "fit_score": None, "fit_label": None},
+        ])
+        assert n == 1, f"只有强匹配该进队列，实际 {n}"
+        qids = {r["record_id"] for r in apply_dashboard.queue_view()}
+        assert qids == {"strong"}, qids
+        assert apply_dashboard.queue_view()[0]["fit_score"] == 0.61  # fit_score 落盘了
+
+        # 提交 -> submitted_unverified，落到 applications 视图
+        apply_dashboard.mark_submitted("strong", "click_ok_no_confirmation_signal",
+                                       "https://job-boards.greenhouse.io/reddit/jobs/1", "AI Eng at Reddit")
+        assert apply_dashboard.queue_view() == []
+        apps = apply_dashboard.applications_view()
+        assert len(apps) == 1 and apps[0]["status"] == "submitted_unverified"
+        assert apps[0]["title"] == "AI Eng at Reddit"  # 元数据没丢
+
+        # 手动收尾 -> applied_confirmed
+        assert apply_dashboard.mark_confirmed_by_id("strong") is True
+        assert apply_dashboard.applications_view()[0]["status"] == "applied_confirmed"
+        # queued 状态不允许手动标确认
+        apply_dashboard.queue_jobs([{"id": "strong2", "title": "Z", "url": "https://c.com/1",
+                                     "source": "hn", "fit_score": 0.6, "fit_label": "一般匹配"}])
+        assert apply_dashboard.mark_confirmed_by_id("strong2") is False
+
+        # needs_user 也进 applications
+        apply_dashboard.mark_needs_user("nu1", "验证码", "https://d.com/1", "SRE")
+        assert any(r["status"] == "needs_user" and r["status_reason"] == "验证码"
+                   for r in apply_dashboard.applications_view())
+    print("[PASS] test_apply_dashboard_queue_and_transitions")
+
+
+def test_apply_dashboard_joins_legacy_applied_jobs():
+    """applied_jobs.json 里有、status_store 里没有的旧记录：按 applied_confirmed 显示。"""
+    from src.core import apply_dashboard, applied_jobs_store
+    with _isolated_stores():
+        applied_jobs_store.record_applied("https://job-boards.greenhouse.io/acme/jobs/9",
+                                          "Backend Engineer at Acme", record_id="old_rec")
+        apps = apply_dashboard.applications_view()
+        assert len(apps) == 1
+        assert apps[0]["status"] == "applied_confirmed"
+        assert apps[0]["record_id"] == "old_rec"
+        assert "Acme" in apps[0]["title"]
+    print("[PASS] test_apply_dashboard_joins_legacy_applied_jobs")
+
+
+def test_migrate_status_store():
+    from scripts import migrate_status_store as mig
+    d = tempfile.mkdtemp()
+    try:
+        f = os.path.join(d, "status_store.json")
+        with open(f, "w") as fh:
+            _json.dump({"a": "applied", "b": "viewed", "c": {"status": "needs_user", "reason": "x"}}, fh)
+        orig = mig.STATUS_FILE
+        mig.STATUS_FILE = f
+        try:
+            res = mig.migrate(dry_run=False)
+            data = _json.load(open(f))
+            assert data["a"]["status"] == "applied_confirmed"
+            assert data["b"]["status"] == "viewed"
+            assert data["c"] == {"status": "needs_user", "reason": "x"}  # 已是新格式，不动
+            assert res["migrated"] == 2 and res["unchanged"] == 1
+            assert any(x.startswith("status_store.json.bak-") for x in os.listdir(d)), "没有生成备份"
+            # 幂等：再跑一次不该再改
+            assert mig.migrate(dry_run=False)["migrated"] == 0
+        finally:
+            mig.STATUS_FILE = orig
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+    print("[PASS] test_migrate_status_store")
+
+
+def test_classify_submit_outcome():
+    from src.tab_b_jobsearch.apply.orchestrator import _classify_submit_outcome
+
+    class FakePage:
+        def __init__(self, url, body, has_form=False):
+            self._url, self._body, self._has_form = url, body, has_form
+        @property
+        def url(self):
+            return self._url
+        def inner_text(self, *a, **k):
+            return self._body
+        def locator(self, *a, **k):
+            page = self
+            class L:
+                def count(self_inner):
+                    return 1 if page._has_form else 0
+            return L()
+
+    # 确认文案 -> confirmed
+    o, r = _classify_submit_outcome(FakePage("https://x/apply", "Thank you for applying! Your application has been submitted.", True), "https://x/apply")
+    assert o == "confirmed" and "text" in r
+
+    # application id -> confirmed
+    o, _ = _classify_submit_outcome(FakePage("https://x/apply", "Confirmation number: AB12CD34", True), "https://x/apply")
+    assert o == "confirmed"
+
+    # 跳到感谢页 -> confirmed
+    o, _ = _classify_submit_outcome(FakePage("https://x/thank-you", "ok", True), "https://x/apply")
+    assert o == "confirmed"
+
+    # 表单没了、URL 没变 -> confirmed（弱信号）
+    o, r = _classify_submit_outcome(FakePage("https://x/apply", "Submitted.", has_form=False), "https://x/apply")
+    assert o == "confirmed" and r == "form_replaced_after_submit"
+
+    # 点击成功但啥信号都没有 -> submitted
+    o, r = _classify_submit_outcome(FakePage("https://x/apply", "Please fill out all fields.", True), "https://x/apply")
+    assert o == "submitted" and r == "click_ok_no_confirmation_signal"
+
+    print("[PASS] test_classify_submit_outcome")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -1032,4 +1196,9 @@ if __name__ == "__main__":
     test_apply_start_never_raises_bare_exception()
     test_apply_start_route_returns_json_detail_on_failure()
     test_browser_ops_pinned_to_one_thread()
+    test_status_store_backward_compat()
+    test_apply_dashboard_queue_and_transitions()
+    test_apply_dashboard_joins_legacy_applied_jobs()
+    test_migrate_status_store()
+    test_classify_submit_outcome()
     print("\n全部回归测试通过。")

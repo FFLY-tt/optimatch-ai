@@ -342,6 +342,63 @@ def start_application(
                 pass
 
 
+# 提交后"对方系统真的收到了"的信号——URL 落到感谢页 / 正文出现确认文案 / 出现 application id。
+_THANKYOU_URL_RE = re.compile(
+    r"/(thanks?|thank[-_]?you|confirmation|confirmed|submitted|success|application[-_]?complete)"
+    r"|[?&](submitted|success|confirmation)=|/applications?/[a-z0-9-]{6,}/?$",
+    re.IGNORECASE,
+)
+_CONFIRM_TEXT_RE = re.compile(
+    r"thank you for (applying|your (application|interest|submission))"
+    r"|your application (has been|was) (submitted|received|sent)"
+    r"|application (submitted|received|complete)"
+    r"|we('| ha)ve received your application"
+    r"|successfully (applied|submitted)"
+    r"|thanks for applying"
+    r"|感谢您的申请|申请已(提交|收到|成功)|提交成功",
+    re.IGNORECASE,
+)
+_APP_ID_RE = re.compile(r"\b(application|confirmation|reference)\s*(id|number|#)\s*[:#]?\s*([A-Za-z0-9-]{4,})", re.IGNORECASE)
+
+
+def _classify_submit_outcome(page, url_before: str) -> tuple[str, str]:
+    """
+    点完提交按钮后，尽力判断对方系统到底收没收到。
+    返回 (outcome, reason)：
+      outcome = "confirmed"   —— 有可信信号（感谢页 / 确认文案 / application id）
+      outcome = "submitted"   —— 点击没报错，但没抓到确认信号（大多数 ATS 属于这类）
+    这层判定故意做得保守 + 集中在这一个函数里，方便之后按实测调整门槛。
+    """
+    try:
+        url_after = page.url or ""
+    except Exception:
+        return "submitted", "click_ok_page_unreadable"
+
+    try:
+        body_text = page.inner_text("body", timeout=3000)
+    except Exception:
+        body_text = ""
+
+    if _CONFIRM_TEXT_RE.search(body_text):
+        return "confirmed", "confirmation_text_on_page"
+    m = _APP_ID_RE.search(body_text)
+    if m:
+        return "confirmed", f"application_id:{m.group(3)[:24]}"
+    if url_after and url_after != url_before and _THANKYOU_URL_RE.search(url_after):
+        return "confirmed", f"redirect_to:{urlsplit(url_after).path[:60]}"
+
+    # 有些 ATS 提交成功后只是把整张表单换成一句话/一个对勾，URL 不变、也没有上面的关键词——
+    # 退一步：提交按钮 + 表单字段都不在了，也算一个（弱）成功信号。
+    try:
+        still_has_form = page.locator("input[type=file], input[type=email]").count() > 0
+    except Exception:
+        still_has_form = True
+    if not still_has_form and url_after == url_before:
+        return "confirmed", "form_replaced_after_submit"
+
+    return "submitted", "click_ok_no_confirmation_signal"
+
+
 def confirm_submit(session_id: str) -> dict:
     session = session_store.pop_session(session_id)
     if session is None:
@@ -356,13 +413,17 @@ def confirm_submit(session_id: str) -> dict:
         _safe_close(page)
         raise ApplyError("这个会话没有定位到可点击的提交按钮，不能提交，先取消重新走一遍。")
 
+    outcome, reason = "submitted", "click_not_completed"
     try:
+        url_before = _safe_url(page)
         submit_button.click(timeout=10000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(2500)
         try:
             page.wait_for_load_state("networkidle", timeout=8000)
         except Exception:
             pass
+        outcome, reason = _classify_submit_outcome(page, url_before)
+        log.info("apply.confirm outcome=%s reason=%s session=%s", outcome, reason, session_id)
     except ApplyError:
         raise
     except Exception as e:
@@ -371,12 +432,13 @@ def confirm_submit(session_id: str) -> dict:
     finally:
         _safe_close(page)
 
-    log.info("apply.confirm done session=%s", session_id)
     return {
         "success": True,
         "job_id": job_id,
         "job_url": session.get("job_url", ""),
         "job_title": session.get("job_title", ""),
+        "outcome": outcome,     # "confirmed" | "submitted"
+        "outcome_reason": reason,
     }
 
 

@@ -149,3 +149,15 @@ export function cancelApply(sessionId) {
     body: JSON.stringify({ session_id: sessionId }),
   })
 }
+
+export function getApplyDashboard() {
+  return request('/api/apply/dashboard')
+}
+
+export function markApplyConfirmed(recordId) {
+  return request('/api/apply/mark-confirmed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ record_id: recordId }),
+  })
+}

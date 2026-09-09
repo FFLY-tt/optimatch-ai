@@ -16,6 +16,7 @@ from src.core.vector_store import (
     add_resume_chunks, add_resume_keywords, get_all_resume_chunks, load_resume_keywords,
 )
 from src.core.status_store import get_status
+from src.core import apply_dashboard
 from src.core.resume_by_job_store import set_resume_for_job
 from src.core.applied_jobs_store import is_applied
 from src.tab_b_jobsearch.job_pref_filter import build_prefs, check_job
@@ -485,6 +486,17 @@ def search_jobs(request: SearchJobsRequest):
 
     sorted_per_source = [_sort_by_fit(source_jobs) for source_jobs in per_source_deduped]
     jobs = _round_robin_merge(sorted_per_source, limit=request.max_results)
+
+    # 够格的职位进"待处理队列"（投递看板 Queue 视图的数据来源）。fit_score/fit_label
+    # 本来只在这个响应里、从不落盘，这里顺带存一份，看板才展示得出来。
+    try:
+        apply_dashboard.queue_jobs([
+            {"id": j.id, "title": j.title, "url": j.url, "source": j.source,
+             "fit_score": j.fit_score, "fit_label": j.fit_label}
+            for j in jobs
+        ])
+    except Exception as e:
+        print(f"  [调试] 写投递队列失败（不影响搜索结果）: {e}")
 
     return SearchJobsResponse(jobs=jobs, total=len(jobs), profile_scored=True)
 

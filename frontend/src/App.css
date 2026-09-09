@@ -512,6 +512,63 @@ button.btn-ghost {
   background: var(--lavender-tint);
   color: var(--lavender-ink);
 }
+.badge--medium {
+  background: var(--blue-tint);
+  color: var(--blue-ink);
+}
+
+/* ---------- 投递看板 (Stage 04) ---------- */
+.stage[data-accent='sky'] .stage__badge {
+  border-color: var(--blue);
+  background: var(--blue-tint);
+  color: var(--blue-ink);
+}
+.dashboard__tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.dashboard__tab {
+  padding: 6px 14px;
+  border: 2px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--raised);
+  font-size: 13px;
+  cursor: pointer;
+}
+.dashboard__tab--active {
+  border-color: var(--blue);
+  background: var(--blue-tint);
+  color: var(--blue-ink);
+  font-weight: 600;
+}
+.dashboard__toolbar {
+  margin-bottom: 8px;
+}
+.dashboard__table th,
+.dashboard__table td {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.dashboard__table td a {
+  white-space: normal;
+}
+.dashboard__time {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.dashboard__reason {
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  white-space: normal;
+  max-width: 20em;
+}
+.dashboard__empty {
+  text-align: center;
+  color: var(--text-faint);
+  padding: 18px;
+}
 
 /* fit_label：强匹配用 mint，一般匹配用 lavender（中性/信息），弱匹配用 straw */
 .badge--fit-strong {
