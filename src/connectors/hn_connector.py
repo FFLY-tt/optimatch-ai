@@ -22,6 +22,13 @@ FIREBASE_ITEM_URL = "https://hacker-news.firebaseio.com/v0/item/{}.json"
 # 标准月度帖格式："ask hn: who is hiring? (july 2026)"
 _MONTHLY_TITLE_PATTERN = re.compile(r"^ask hn: who is hiring\?\s*\(")
 
+# "Who is hiring" 帖里偶尔混进求职者自己发的贴（本该发到 "Who wants to be hired?" 帖），
+# 这些不是职位、正文里也没有公司的申请入口。开头这几个标志基本能识别出来。
+_SEEKER_MARKER_RE = re.compile(
+    r"^\s*(?:\|?\s*)?(?:\[?\s*(?:for\s*hire|seeking(?:\s*work| freelance)?|available|looking for (?:work|a (?:new )?(?:job|role|position)))\b)",
+    re.IGNORECASE,
+)
+
 
 def get_latest_who_is_hiring_id() -> int:
     """搜索最新一期标准月度 Who is hiring 帖子，返回它的 HN item id"""
@@ -103,6 +110,11 @@ def fetch_hn_jobs(limit: int = 50) -> list[UnifiedRecord]:
             continue
 
         clean_text = _clean_hn_text(text)
+
+        # 求职者自己发的贴（发错帖了）——不是职位，跳过
+        if _SEEKER_MARKER_RE.match(clean_text.strip()):
+            skipped_no_text += 1
+            continue
 
         posted_at = None
         if item.get("time"):

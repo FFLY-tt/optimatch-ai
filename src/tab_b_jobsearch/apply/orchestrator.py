@@ -9,7 +9,9 @@
 
 import dataclasses
 import os
+import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from src.tab_b_jobsearch.apply import browser, session as session_store
 from src.tab_b_jobsearch.apply.profile import load_profile, ProfileNotConfigured
@@ -80,6 +82,112 @@ def detect_captcha(page) -> bool:
     return False
 
 
+# 打开后先做一道"这到底是不是职位申请表单"的健全性检查——挡住 ycombinator.com/apply
+# 这种平台通用页 / 登录页 / 加载失败变成 about:blank 的情况，不让浏览器晾成一个
+# 用户看不懂的状态，而是明确报错跳过。
+_KNOWN_ATS_HOST_HINTS = (
+    "greenhouse.io", "lever.co", "ashbyhq.com", "myworkdayjobs.com", "workday.com",
+    "smartrecruiters.com", "workable.com", "bamboohr.com", "icims.com", "jobvite.com",
+    "taleo.net", "successfactors", "recruitee.com", "teamtailor.com", "breezy.hr",
+    "applytojob.com", "jazz.co", "jobs.jobvite", "myworkdaysite.com", "eightfold.ai",
+    "gr8people.com", "phenompeople.com", "avature.net",
+)
+
+
+def _page_host(page) -> str:
+    try:
+        return (urlsplit(page.url or "").netloc or "").lower()
+    except Exception:
+        return ""
+
+
+_LOGIN_PAGE_TEXT_RE = re.compile(
+    r"\b(log ?in|sign ?in|sign ?up|create (an )?account|forgot (your )?password|"
+    r"continue with (google|github|linkedin|apple)|welcome back)\b", re.IGNORECASE)
+_APPLICATION_TEXT_RE = re.compile(
+    r"\b(apply for|application for|submit (your )?application|attach (your )?resume|"
+    r"upload (your )?(resume|cv)|cover letter|work experience|years of experience|"
+    r"why do you want to|equal employment|voluntary self.?identification)\b", re.IGNORECASE)
+
+_PAGE_PROBE_JS = """
+() => {
+  const all = [...document.querySelectorAll('input, textarea, select')];
+  const attr = (el, ...names) => names.map(n => (el.getAttribute(n) || '')).join(' ').toLowerCase();
+  const isName = el => {
+    const a = attr(el, 'name', 'id', 'aria-label', 'placeholder');
+    return /\\bname\\b|first.?name|last.?name|\\bfname\\b|\\blname\\b|full.?name|legal name/.test(a)
+        && !/user\\s*name|username|user_name|file|company|display/.test(a);
+  };
+  const isEmail = el => (el.type === 'email') || /e-?mail/.test(attr(el, 'name', 'id', 'aria-label', 'placeholder'));
+  const fillable = all.filter(el => !['hidden','submit','button','reset','image'].includes((el.type || '').toLowerCase()));
+  const bodyText = (document.body ? (document.body.innerText || document.body.textContent) : '') || '';
+  return {
+    fileInputs: document.querySelectorAll('input[type=file]').length,
+    passwordInputs: document.querySelectorAll('input[type=password]').length,
+    fillable: fillable.length,
+    emailLike: fillable.filter(isEmail).length,
+    nameLike: fillable.filter(isName).length,
+    text: bodyText.slice(0, 6000),
+  };
+}
+"""
+
+
+def _looks_like_application_page(page, scope) -> tuple[bool, str]:
+    """(是不是职位申请表单, 不是的话给个原因)。判不准偏向"不是"，让用户手动处理。"""
+    try:
+        url = (page.url or "").strip().lower()
+    except Exception:
+        url = ""
+    if not url or url.startswith("about:") or url.startswith("chrome:") or url == "data:,":
+        return False, f"页面没有正常加载（当前地址：{page.url or '空'}）"
+
+    probe = None
+    for sc in [scope, page]:
+        try:
+            probe = sc.evaluate(_PAGE_PROBE_JS)
+            if probe:
+                break
+        except Exception:
+            continue
+    if not probe:
+        return False, "读不到页面结构，可能没正常加载"
+
+    text = probe.get("text", "")
+    has_apply_words = bool(_APPLICATION_TEXT_RE.search(text))
+    has_login_words = bool(_LOGIN_PAGE_TEXT_RE.search(text))
+    fillable = probe.get("fillable", 0)
+    files = probe.get("fileInputs", 0)
+    passwords = probe.get("passwordInputs", 0)
+    emails = probe.get("emailLike", 0)
+    names = probe.get("nameLike", 0)
+
+    host = _page_host(page)
+    # 已知 ATS 域名（只匹配 host，不匹配 query 里的 continue=… 之类）+ 页面确实有可填字段
+    if fillable >= 1 and passwords == 0 and any(h in host for h in _KNOWN_ATS_HOST_HINTS):
+        return True, ""
+
+    # 强负向：有密码框 = 登录/注册页，不是申请表单（除非同时有简历上传框，那才可能是内嵌登录的申请页）
+    if passwords >= 1 and files == 0:
+        return False, "打开的是登录 / 注册页（有密码输入框），不是职位申请表单"
+
+    # 强正向：有简历上传框 —— 普通页面 / 登录页几乎不会有 <input type=file>
+    if files >= 1:
+        return True, ""
+    # 正向：真·姓名字段 + 邮箱字段 + 若干字段（典型申请表结构，且已排除了密码框）
+    if names >= 1 and emails >= 1 and fillable >= 3:
+        return True, ""
+    # 正向：邮箱 + 多字段 + 页面文案明确在讲"申请 / 简历"
+    if emails >= 1 and fillable >= 4 and has_apply_words:
+        return True, ""
+
+    if fillable == 0:
+        return False, "页面上没有任何可填写的表单字段"
+    if has_login_words and not has_apply_words:
+        return False, "打开的更像是登录 / 注册页，不是职位申请表单"
+    return False, "页面上没有识别到职位申请表单的特征（姓名 / 邮箱 / 简历上传等）"
+
+
 @dataclass
 class ApplyDraft:
     session_id: str
@@ -145,6 +253,19 @@ def start_application(
     if chosen is None:
         page.close()
         raise ApplyError("没能打开这个职位的申请表单。\n" + "\n".join(messages))
+
+    # 健全性检查：确认打开的确实是职位申请表单，不是平台通用页 / 登录页 / 空白页。
+    form_ok, form_reason = _looks_like_application_page(page, open_scope)
+    if not form_ok:
+        try:
+            page.close()
+        except Exception:
+            pass
+        raise ApplyError(
+            f"未找到申请表单，已跳过这条职位：{form_reason}。"
+            f"这条链接可能不是某个具体职位的申请页（比如是平台首页 / 登录页 / "
+            f"孵化器申请页），请点职位标题打开原链接手动确认。"
+        )
 
     captcha_present = detect_captcha(page)
     filled_fields = chosen.fill(open_scope, profile, job_description)

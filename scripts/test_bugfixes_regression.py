@@ -278,6 +278,13 @@ def test_anysearch_job_listing_pages_are_detected():
         "https://ca.linkedin.com/jobs/artificial-intelligence-engineer-jobs",
         "https://www.glassdoor.ca/Job/canada-machine-learning-engineer-jobs-SRCH_IL.0,6_IN3_KO7,32.htm",
         "https://www.crossover.com/jobs/ai-engineer/ca",
+        # 招聘/孵化平台自己的通用入口页（实测坐实：ycombinator.com/apply 被当成职位申请页）
+        "https://www.ycombinator.com/apply/",
+        "https://www.ycombinator.com/apply",
+        "https://www.ycombinator.com/companies",
+        "https://www.workatastartup.com/",
+        "https://acme.io/login",
+        "https://boards.somecompany.com/signup",
     ):
         assert looks_like_job_listing_page(url), f"聚合/搜索页漏判：{url}"
 
@@ -292,6 +299,9 @@ def test_anysearch_job_listing_pages_are_detected():
         ("https://www.reddit.com/r/SoftwareEngineerJobs/comments/1oniqs0/hiring_x/", "Hiring Software & AI Engineers (US/Canada Remote)"),
         # 公司 careers 页带具体职位 slug（尾部有 id），是详情页不是落地页
         ("https://acme.com/careers/senior-ml-engineer-4a9f2b", "Senior ML Engineer"),
+        # YC WaaS 上某公司的具体职位页，不能被"平台通用页"规则误伤
+        ("https://www.ycombinator.com/companies/stripe/jobs/abc123-backend-engineer", "Backend Engineer"),
+        ("https://www.workatastartup.com/jobs/54321", "ML Engineer"),
     ):
         assert not looks_like_job_listing_page(url, title), f"单条职位详情页被误判成列表页：{url}"
 
@@ -831,6 +841,93 @@ def test_applied_jobs_dedup():
     print("[PASS] test_applied_jobs_dedup")
 
 
+# 实测坐实过一次：自动投递把 https://www.ycombinator.com/apply/（YC 孵化器"申请加入 YC"
+# 的页面）当成职位申请入口打开，点 Apply 后跳到 YC 账号登录页，脚本在上面找不到申请表单，
+# 没优雅退出、把浏览器晾成了 about:blank。新增 _looks_like_application_page 健全性检查：
+# 打开后先确认是不是职位申请表单，不是就 page.close() + 明确报错。
+def test_application_page_sanity_check():
+    from src.tab_b_jobsearch.apply.orchestrator import _looks_like_application_page
+
+    class _FakePage:
+        def __init__(self, url):
+            self.url = url
+
+    class _FakeScope:
+        def __init__(self, probe):
+            self._probe = probe
+        def evaluate(self, _js):
+            return self._probe
+
+    def check(url, probe):
+        return _looks_like_application_page(_FakePage(url), _FakeScope(probe))
+
+    # about:blank / 没加载 -> False
+    ok, why = check("about:blank", {})
+    assert not ok and "没有正常加载" in why
+
+    # YC 登录页（"Username or email" 单字段、有 "Log in" 字样、没有 apply/resume 特征）-> False
+    ok, why = check(
+        "https://account.ycombinator.com/?continue=https%3A%2F%2Fapply.ycombinator.com%2Fhome",
+        {"fileInputs": 0, "passwordInputs": 0, "fillable": 1, "emailLike": 0, "nameLike": 0,
+         "text": "Log in to access the YC Application\nUsername or email\nContinue"},
+    )
+    assert not ok, why
+
+    # 常规登录页（有密码框）-> False
+    ok, why = check("https://acme.com/account/login",
+                    {"fileInputs": 0, "passwordInputs": 1, "fillable": 3, "emailLike": 1, "nameLike": 0,
+                     "text": "Sign in to your account. Forgot your password?"})
+    assert not ok and ("登录" in why or "注册" in why)
+
+    # 真·申请表单：有简历上传框 -> True
+    ok, why = check("https://acme.com/careers/apply/123",
+                    {"fileInputs": 1, "passwordInputs": 0, "fillable": 6, "emailLike": 1, "nameLike": 2,
+                     "text": "Apply for this job. Attach your resume."})
+    assert ok, why
+
+    # 真·申请表单：姓名+邮箱+多字段，无密码框 -> True
+    ok, why = check("https://acme.com/careers/apply/123",
+                    {"fileInputs": 0, "passwordInputs": 0, "fillable": 5, "emailLike": 1, "nameLike": 2,
+                     "text": "First name, Last name, Email, Phone, LinkedIn"})
+    assert ok, why
+
+    # 已知 ATS 域名 + 有字段 -> True（哪怕文案里没有明显的 apply 字样）
+    ok, why = check("https://job-boards.greenhouse.io/acme/jobs/123",
+                    {"fileInputs": 0, "passwordInputs": 0, "fillable": 4, "emailLike": 1, "nameLike": 1, "text": ""})
+    assert ok, why
+
+    # 营销页 / 落地页：有几个字段但既不像申请表也没 ATS 域名 -> False
+    ok, why = check("https://www.ycombinator.com/apply/",
+                    {"fileInputs": 0, "passwordInputs": 0, "fillable": 2, "emailLike": 0, "nameLike": 0,
+                     "text": "Apply to Y Combinator. The next batch deadline is..."})
+    assert not ok, why
+
+    print("[PASS] test_application_page_sanity_check")
+
+
+def test_hn_connector_url_and_seeker_filter():
+    """
+    排查 ycombinator.com/apply 那条错误结果时确认过：HN 连接器每条记录的 url 永远是
+    news.ycombinator.com/item?id=...（HN 评论本身），它根本不从评论正文里提取公司的
+    申请链接（_clean_hn_text 会把所有 <a> 标签剥掉只留文字）——所以 HN 不可能产出
+    ycombinator.com/apply 这种 url。顺手加的：求职者发错帖的贴要被跳过。
+    """
+    import inspect
+    from src.connectors import hn_connector
+
+    src = inspect.getsource(hn_connector.fetch_hn_jobs)
+    assert 'url=f"https://news.ycombinator.com/item?id={cid}"' in src, \
+        "HN 记录的 url 不再是固定的 HN 评论地址了？"
+
+    R = hn_connector._SEEKER_MARKER_RE
+    assert R.match("Seeking work | Remote | Python developer")
+    assert R.match("[FOR HIRE] Senior Backend Engineer")
+    assert not R.match("Acme Corp | Senior Engineer | Remote")
+    assert not R.match("We are hiring a Data Scientist")
+
+    print("[PASS] test_hn_connector_url_and_seeker_filter")
+
+
 if __name__ == "__main__":
     test_main_app_imports_cleanly()
     test_word_export_dir_resolves_to_project_root()
@@ -850,4 +947,6 @@ if __name__ == "__main__":
     test_mismatched_job_flagged_weak_but_not_fabricated()
     test_location_visa_filter()
     test_applied_jobs_dedup()
+    test_application_page_sanity_check()
+    test_hn_connector_url_and_seeker_filter()
     print("\n全部回归测试通过。")

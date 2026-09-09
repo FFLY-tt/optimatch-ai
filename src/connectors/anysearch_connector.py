@@ -131,6 +131,19 @@ _JOB_LISTING_PATH_TAIL_RE = re.compile(
 # 列表页在 URL query 里常见的搜索参数键。
 _JOB_LISTING_QUERY_KEYS = {"q", "query", "keyword", "keywords", "search", "searchkeyword", "k", "l"}
 
+# 招聘 / 孵化平台"自己的通用入口页" —— 不是某条具体职位，而是平台自身的
+# 申请 / 注册 / 登录 / 榜单页。实测坐实过一次：自动投递把
+# https://www.ycombinator.com/apply/（YC 孵化器"创业公司申请加入 YC"的页面）
+# 当成职位申请入口打开，点了 Apply 之后跳到要登录 YC 账号的页面。
+_PLATFORM_GENERIC_PAGE_RE = re.compile(
+    r"^(?:www\.)?ycombinator\.com/(?:apply|cofounder-matching|about|people|blog|library|"
+    r"companies/?$|companies/founders)"
+    r"|^(?:www\.)?workatastartup\.com/?(?:$|companies/?$|about|\?)"
+    r"|^(?:www\.)?(?:angel\.co|angellist\.com|wellfound\.com)/?$"
+    r"|/(?:signup|sign-up|register|create-account|log-?in|sign-?in)(?:/|$)",
+    re.IGNORECASE,
+)
+
 # 标题层面的信号——聚合站的 SEO 标题模式（"XX Jobs in YY"、"XX Jobs (Sep 2026)"、
 # "1,200 XX Jobs"、"Browse/Explore/Find XX Jobs"），单条职位标题几乎不会长这样。
 _JOB_LISTING_TITLE_RE = re.compile(
@@ -161,7 +174,11 @@ def looks_like_job_listing_page(url: str, title: str = "") -> bool:
     if _JOB_DETAIL_URL_RE.search(u):
         return False
 
-    # 2) 职位搜索引擎站点（除详情页外都是搜索/列表页）
+    # 2) 平台自己的通用入口页（YC 孵化器申请页 / 注册登录页等）—— 不是职位
+    if _PLATFORM_GENERIC_PAGE_RE.search(f"{host}{path}"):
+        return True
+
+    # 3) 职位搜索引擎站点（除详情页外都是搜索/列表页）
     if any(host == h or host.endswith("." + h) for h in _JOB_SEARCH_ENGINE_HOSTS):
         return True
 
