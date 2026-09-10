@@ -10,8 +10,11 @@
 
 迁移前把原文件备份成 status_store.json.bak-<时间戳>。
 
-跑法：python -m scripts.migrate_status_store        （实际写入）
-      python -m scripts.migrate_status_store --dry  （只打印会怎么改，不落盘）
+安全默认：不加参数 = 只预览（dry run），不写任何东西。确认预览结果没问题后，
+再加 --apply 才会真正落盘（落盘前一定先备份成 status_store.json.bak-<时间戳>）。
+
+跑法：python -m scripts.migrate_status_store            （预览，默认）
+      python -m scripts.migrate_status_store --apply    （确认后执行）
 """
 import json
 import os
@@ -54,7 +57,7 @@ def migrate(dry_run: bool = False) -> dict:
     print(f"\n共 {len(data)} 条：迁移 {migrated} 条，已是新格式 {unchanged} 条。")
 
     if dry_run:
-        print("(--dry 模式，未写入)")
+        print("（预览模式，未写入。确认无误后加 --apply 执行。）")
         return {"migrated": migrated, "unchanged": unchanged}
 
     backup = STATUS_FILE + ".bak-" + datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -67,4 +70,5 @@ def migrate(dry_run: bool = False) -> dict:
 
 
 if __name__ == "__main__":
-    migrate(dry_run="--dry" in sys.argv)
+    # 默认 dry run；只有显式 --apply 才真正写入
+    migrate(dry_run="--apply" not in sys.argv)

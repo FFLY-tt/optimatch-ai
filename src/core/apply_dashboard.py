@@ -233,3 +233,53 @@ def applications_view() -> list[dict]:
     rows = [r for r in _all_rows() if r["status"] in keep]
     rows.sort(key=lambda r: (r["updated_at"] or r["applied_at"] or ""), reverse=True)
     return rows
+
+
+# ---------------------------------------------------------------- 清理 / 归档
+
+_QUEUE_STALE_DAYS = 45          # 排队中的职位这么久没在搜索里再出现过，就当它没了
+_COMPACT_MARKER = QUEUE_FILE.replace(".json", ".compacted")
+
+
+def compact(force: bool = False) -> dict:
+    """
+    - job_queue.json：状态还停在 queued_for_review / new、且超过 _QUEUE_STALE_DAYS 天
+      没被搜索再命中过（last_seen 太旧）的条目直接删——posting 基本已经没了。
+      被任何"终态"（已投递/已确认/needs_user）引用的条目一律保留，不管多旧。
+    - applied_jobs：转调 applied_jobs_store.compact()（超一年归档）。
+    默认一天最多跑一次（marker 文件记日期），force=True 强制跑。
+    """
+    from datetime import datetime, timezone, timedelta
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not force and os.path.exists(_COMPACT_MARKER):
+        try:
+            if open(_COMPACT_MARKER).read().strip() == today:
+                return {"skipped": "already_ran_today"}
+        except Exception:
+            pass
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_QUEUE_STALE_DAYS)).isoformat()
+    removed = 0
+    with _lock:
+        q = _load_queue()
+        records = status_store.all_records()
+        kept = {}
+        for rid, meta in q.items():
+            st = records.get(rid, {}).get("status", "new")
+            stale = (meta.get("last_seen") or "9999") < cutoff
+            if st in (status_store.STATUS_QUEUED, "new", "viewed") and stale:
+                removed += 1
+                continue
+            kept[rid] = meta
+        if removed:
+            _save_queue(kept)
+
+    from src.core.applied_jobs_store import compact as _applied_compact
+    applied_res = _applied_compact()
+
+    try:
+        with open(_COMPACT_MARKER, "w") as f:
+            f.write(today)
+    except Exception:
+        pass
+    return {"queue_removed": removed, "applied": applied_res}

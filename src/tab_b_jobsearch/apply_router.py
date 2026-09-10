@@ -208,6 +208,10 @@ class DashboardResponse(BaseModel):
 @router.get("/api/apply/dashboard", response_model=DashboardResponse)
 def apply_dashboard_view():
     """Queue（待处理）+ Applications（历史）两个视图的只读数据。刷新页面即拿最新状态。"""
+    try:
+        apply_dashboard.compact()  # 每天最多跑一次，清理长期没再出现的排队记录 + 归档一年前的投递
+    except Exception as e:
+        log.warning("apply_dashboard.compact 失败（不影响读取）: %s", e)
     return DashboardResponse(
         queue=apply_dashboard.queue_view(),
         applications=apply_dashboard.applications_view(),

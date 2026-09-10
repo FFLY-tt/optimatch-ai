@@ -298,6 +298,7 @@ def start_application(
             job_id=job_id,
             job_url=job_url,
             job_title=job_title,
+            platform=chosen.platform_name,
         )
         screenshot_path = os.path.join(SCREENSHOT_DIR, f"{session_id_placeholder}.png")
         try:
@@ -360,14 +361,22 @@ _CONFIRM_TEXT_RE = re.compile(
 )
 _APP_ID_RE = re.compile(r"\b(application|confirmation|reference)\s*(id|number|#)\s*[:#]?\s*([A-Za-z0-9-]{4,})", re.IGNORECASE)
 
+# 每次提交后的分类结果都追加一行到这里，跑一两周回头看有没有"该 confirmed 却被漏判"
+# 的模式，再回来扩关键词 / 跳转 URL 规则（跟进项 #4）。
+_SUBMIT_LOG = os.path.join(DATA_DIR, "apply_submit_log.jsonl")
 
-def _classify_submit_outcome(page, url_before: str) -> tuple[str, str]:
+
+def _classify_submit_outcome(page, url_before: str, platform: str = "", had_form_before: bool = True) -> tuple[str, str]:
     """
     点完提交按钮后，尽力判断对方系统到底收没收到。
     返回 (outcome, reason)：
       outcome = "confirmed"   —— 有可信信号（感谢页 / 确认文案 / application id）
       outcome = "submitted"   —— 点击没报错，但没抓到确认信号（大多数 ATS 属于这类）
     这层判定故意做得保守 + 集中在这一个函数里，方便之后按实测调整门槛。
+
+    had_form_before：点提交前页面上确实有 file/email 输入框吗——只有"提交前有、
+    提交后没了"才算"表单被替换"这个弱信号。LinkedIn/Indeed 的表单在弹窗/新
+    tab 里，底层职位页从来就没有这些字段，不能靠这个弱信号（会误判成 confirmed）。
     """
     try:
         url_after = page.url or ""
@@ -387,16 +396,44 @@ def _classify_submit_outcome(page, url_before: str) -> tuple[str, str]:
     if url_after and url_after != url_before and _THANKYOU_URL_RE.search(url_after):
         return "confirmed", f"redirect_to:{urlsplit(url_after).path[:60]}"
 
-    # 有些 ATS 提交成功后只是把整张表单换成一句话/一个对勾，URL 不变、也没有上面的关键词——
-    # 退一步：提交按钮 + 表单字段都不在了，也算一个（弱）成功信号。
-    try:
-        still_has_form = page.locator("input[type=file], input[type=email]").count() > 0
-    except Exception:
-        still_has_form = True
-    if not still_has_form and url_after == url_before:
-        return "confirmed", "form_replaced_after_submit"
+    # 弱信号：提交前有表单字段、提交后没了、URL 也没变 —— 大概是"原地把表单换成一句话"。
+    # LinkedIn/Indeed 不吃这个弱信号，必须有上面的强信号才判 confirmed。
+    if platform in ("linkedin", "indeed"):
+        return "submitted", "click_ok_no_strong_signal_easyapply"
+    if had_form_before:
+        try:
+            still_has_form = page.locator("input[type=file], input[type=email]").count() > 0
+        except Exception:
+            still_has_form = True
+        if not still_has_form and url_after == url_before:
+            return "confirmed", "form_replaced_after_submit"
 
     return "submitted", "click_ok_no_confirmation_signal"
+
+
+def _log_submit_outcome(job_url: str, platform: str, outcome: str, reason: str, page) -> None:
+    """把分类结果追加进 apply_submit_log.jsonl（失败静默，绝不影响投递本身）。"""
+    try:
+        import json
+        from datetime import datetime, timezone
+        try:
+            snippet = (page.inner_text("body", timeout=1500) or "")[:400].replace("\n", " ")
+        except Exception:
+            snippet = ""
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "platform": platform,
+            "outcome": outcome,
+            "reason": reason,
+            "job_url": job_url,
+            "host": urlsplit(job_url or "").netloc,
+            "page_snippet": snippet,
+        }
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(_SUBMIT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def confirm_submit(session_id: str) -> dict:
@@ -407,7 +444,9 @@ def confirm_submit(session_id: str) -> dict:
     page = session["page"]
     submit_button = session["submit_button"]
     job_id = session["job_id"]
-    log.info("apply.confirm session=%s job_id=%s", session_id, job_id)
+    platform = session.get("platform", "")
+    job_url = session.get("job_url", "")
+    log.info("apply.confirm session=%s job_id=%s platform=%s", session_id, job_id, platform)
 
     if submit_button is None:
         _safe_close(page)
@@ -416,14 +455,19 @@ def confirm_submit(session_id: str) -> dict:
     outcome, reason = "submitted", "click_not_completed"
     try:
         url_before = _safe_url(page)
+        try:
+            had_form_before = page.locator("input[type=file], input[type=email]").count() > 0
+        except Exception:
+            had_form_before = True
         submit_button.click(timeout=10000)
         page.wait_for_timeout(2500)
         try:
             page.wait_for_load_state("networkidle", timeout=8000)
         except Exception:
             pass
-        outcome, reason = _classify_submit_outcome(page, url_before)
+        outcome, reason = _classify_submit_outcome(page, url_before, platform, had_form_before)
         log.info("apply.confirm outcome=%s reason=%s session=%s", outcome, reason, session_id)
+        _log_submit_outcome(job_url, platform, outcome, reason, page)
     except ApplyError:
         raise
     except Exception as e:

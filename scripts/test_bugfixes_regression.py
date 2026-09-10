@@ -1016,17 +1016,25 @@ import tempfile
 
 @contextlib.contextmanager
 def _isolated_stores():
-    """把 status_store / job_queue / applied_jobs 三个 JSON 都指到临时目录，测完还原。"""
+    """把 status_store / job_queue / applied_jobs（含归档 + compact marker）都指到临时目录，测完还原。"""
     from src.core import status_store, apply_dashboard, applied_jobs_store
     d = tempfile.mkdtemp()
-    saved = (status_store.STATUS_FILE, apply_dashboard.QUEUE_FILE, applied_jobs_store.APPLIED_JOBS_FILE)
+    saved = {
+        "s": status_store.STATUS_FILE,
+        "q": apply_dashboard.QUEUE_FILE, "m": apply_dashboard._COMPACT_MARKER,
+        "a": applied_jobs_store.APPLIED_JOBS_FILE, "ar": applied_jobs_store._ARCHIVE_FILE,
+    }
     status_store.STATUS_FILE = os.path.join(d, "status_store.json")
     apply_dashboard.QUEUE_FILE = os.path.join(d, "job_queue.json")
+    apply_dashboard._COMPACT_MARKER = os.path.join(d, "job_queue.compacted")
     applied_jobs_store.APPLIED_JOBS_FILE = os.path.join(d, "applied_jobs.json")
+    applied_jobs_store._ARCHIVE_FILE = os.path.join(d, "applied_jobs.archive.json")
     try:
         yield d
     finally:
-        (status_store.STATUS_FILE, apply_dashboard.QUEUE_FILE, applied_jobs_store.APPLIED_JOBS_FILE) = saved
+        status_store.STATUS_FILE = saved["s"]
+        apply_dashboard.QUEUE_FILE, apply_dashboard._COMPACT_MARKER = saved["q"], saved["m"]
+        applied_jobs_store.APPLIED_JOBS_FILE, applied_jobs_store._ARCHIVE_FILE = saved["a"], saved["ar"]
         import shutil
         shutil.rmtree(d, ignore_errors=True)
 
@@ -1161,15 +1169,73 @@ def test_classify_submit_outcome():
     o, _ = _classify_submit_outcome(FakePage("https://x/thank-you", "ok", True), "https://x/apply")
     assert o == "confirmed"
 
-    # 表单没了、URL 没变 -> confirmed（弱信号）
-    o, r = _classify_submit_outcome(FakePage("https://x/apply", "Submitted.", has_form=False), "https://x/apply")
+    # 表单没了、URL 没变、且提交前确实有表单 -> confirmed（弱信号）
+    o, r = _classify_submit_outcome(FakePage("https://x/apply", "Submitted.", has_form=False),
+                                    "https://x/apply", platform="generic_ats", had_form_before=True)
     assert o == "confirmed" and r == "form_replaced_after_submit"
 
+    # 提交前底层页面就没有 file/email 输入 -> 不吃这个弱信号
+    o, r = _classify_submit_outcome(FakePage("https://x/apply", "Submitted.", has_form=False),
+                                    "https://x/apply", platform="generic_ats", had_form_before=False)
+    assert o == "submitted", (o, r)
+
+    # LinkedIn/Indeed：没有强信号一律 submitted（弹窗/新 tab 里的表单不能靠弱信号）
+    o, r = _classify_submit_outcome(FakePage("https://linkedin.com/jobs/view/1", "Done", has_form=False),
+                                    "https://linkedin.com/jobs/view/1", platform="linkedin", had_form_before=False)
+    assert o == "submitted" and "easyapply" in r
+    # 但 LinkedIn 真出现 "your application was sent" 这种强信号，还是 confirmed
+    o, _ = _classify_submit_outcome(FakePage("https://linkedin.com/jobs/view/1", "Your application was sent to Acme", True),
+                                    "https://linkedin.com/jobs/view/1", platform="linkedin", had_form_before=True)
+    assert o == "confirmed"
+
     # 点击成功但啥信号都没有 -> submitted
-    o, r = _classify_submit_outcome(FakePage("https://x/apply", "Please fill out all fields.", True), "https://x/apply")
+    o, r = _classify_submit_outcome(FakePage("https://x/apply", "Please fill out all fields.", True),
+                                    "https://x/apply", platform="generic_ats", had_form_before=True)
     assert o == "submitted" and r == "click_ok_no_confirmation_signal"
 
     print("[PASS] test_classify_submit_outcome")
+
+
+def test_apply_stores_compaction():
+    from src.core import apply_dashboard, status_store, applied_jobs_store
+    from datetime import datetime, timezone, timedelta
+    with _isolated_stores():
+        old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        stale = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+
+        # job_queue：一条陈旧的 queued（该删）、一条陈旧但已投递的（该留）、一条新鲜的（该留）
+        apply_dashboard.queue_jobs([
+            {"id": "stale_q", "title": "A", "url": "https://a/1", "source": "hn", "fit_score": 0.6, "fit_label": "强匹配"},
+            {"id": "stale_applied", "title": "B", "url": "https://b/1", "source": "hn", "fit_score": 0.6, "fit_label": "强匹配"},
+            {"id": "fresh_q", "title": "C", "url": "https://c/1", "source": "hn", "fit_score": 0.6, "fit_label": "强匹配"},
+        ])
+        import json as _j
+        q = _j.load(open(apply_dashboard.QUEUE_FILE))
+        q["stale_q"]["last_seen"] = stale
+        q["stale_applied"]["last_seen"] = stale
+        _j.dump(q, open(apply_dashboard.QUEUE_FILE, "w"))
+        status_store.update_status("stale_applied", status_store.STATUS_APPLIED_CONFIRMED)
+
+        # applied_jobs：一条一年前的（该归档）、一条最近的（该留）
+        applied_jobs_store.record_applied("https://old/1", "Old", record_id="old_app")
+        aj = _j.load(open(applied_jobs_store.APPLIED_JOBS_FILE))
+        aj["entries"][0]["applied_at"] = old
+        applied_jobs_store.record_applied("https://new/1", "New", record_id="new_app")
+        aj["entries"] = [aj["entries"][0]] + _j.load(open(applied_jobs_store.APPLIED_JOBS_FILE))["entries"][1:]
+        _j.dump(aj, open(applied_jobs_store.APPLIED_JOBS_FILE, "w"))
+
+        res = apply_dashboard.compact(force=True)
+        assert res["queue_removed"] == 1, res
+        left = set(_j.load(open(apply_dashboard.QUEUE_FILE)).keys())
+        assert left == {"stale_applied", "fresh_q"}, left
+        assert res["applied"]["archived"] == 1
+        remaining = {e["record_id"] for e in applied_jobs_store.list_applied()}
+        assert remaining == {"new_app"}, remaining
+        assert os.path.exists(applied_jobs_store._ARCHIVE_FILE)
+
+        # 同一天再跑不重复
+        assert apply_dashboard.compact().get("skipped") == "already_ran_today"
+    print("[PASS] test_apply_stores_compaction")
 
 
 if __name__ == "__main__":
@@ -1201,4 +1267,5 @@ if __name__ == "__main__":
     test_apply_dashboard_joins_legacy_applied_jobs()
     test_migrate_status_store()
     test_classify_submit_outcome()
+    test_apply_stores_compaction()
     print("\n全部回归测试通过。")

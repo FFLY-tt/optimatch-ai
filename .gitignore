@@ -225,6 +225,11 @@ data/exports/
 data/status_store.json
 data/resume_by_job.json
 data/applied_jobs.json
+data/job_queue.json
+data/job_queue.compacted
+data/applied_jobs.archive.json
+data/apply_submit_log.jsonl
+data/status_store.json.bak-*
 data/resume_document.json
 data/resumes/
 data/resume_keywords.json

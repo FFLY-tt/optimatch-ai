@@ -136,3 +136,40 @@ def is_applied(job_url: str = "", job_title: str = "", company: str = "", record
 def list_applied() -> list[dict]:
     with _lock:
         return list(_load()["entries"])
+
+
+_ARCHIVE_FILE = APPLIED_JOBS_FILE.replace(".json", ".archive.json")
+_MAX_ACTIVE_ENTRIES = 5000
+_ARCHIVE_AFTER_DAYS = 365
+
+
+def compact() -> dict:
+    """
+    去重台账不会真的"无限膨胀"（每条 ~200 字节），但一年前的记录去重价值≈0
+    （那条 posting 早没了）。把超过一年的挪进 applied_jobs.archive.json，
+    再对活跃部分留最新 _MAX_ACTIVE_ENTRIES 条。返回 {archived, dropped, kept}。
+    """
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_ARCHIVE_AFTER_DAYS)).isoformat()
+    with _lock:
+        data = _load()
+        entries = data["entries"]
+        fresh = [e for e in entries if (e.get("applied_at") or "9999") >= cutoff]
+        aged = [e for e in entries if (e.get("applied_at") or "9999") < cutoff]
+
+        fresh.sort(key=lambda e: e.get("applied_at") or "", reverse=True)
+        dropped = fresh[_MAX_ACTIVE_ENTRIES:]
+        fresh = fresh[:_MAX_ACTIVE_ENTRIES]
+
+        to_archive = aged + dropped
+        if to_archive:
+            arch = []
+            if os.path.exists(_ARCHIVE_FILE):
+                with open(_ARCHIVE_FILE, "r", encoding="utf-8") as f:
+                    arch = json.load(f).get("entries", [])
+            arch.extend(to_archive)
+            with open(_ARCHIVE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"entries": arch}, f, ensure_ascii=False, indent=2)
+            data["entries"] = fresh
+            _save(data)
+        return {"archived": len(aged), "dropped": len(dropped), "kept": len(fresh)}
